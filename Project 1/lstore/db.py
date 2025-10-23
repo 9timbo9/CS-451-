@@ -21,6 +21,8 @@ class Database:
         :param num_columns: int     # Number of Columns: all columns are integer
         :param key_index: int       # Index of table key in columns
         """
+        if name in self.tables:
+            raise Exception(f"\"{name}\" table already exists in db")
         table = Table(name, num_columns, key_index)
         self.tables[name] = table
         return table
@@ -29,10 +31,14 @@ class Database:
         """
         Deletes the specified table
         """
+        if name not in self.tables:
+            raise Exception(f"\"{name}\" table doesnt exist in db")
         del self.tables[name]
 
     def get_table(self, name):
         """
         Returns table with the passed name
         """
+        if name not in self.tables:
+            raise Exception(f"\"{name}\" table doesnt exist in db")
         return self.tables[name]
