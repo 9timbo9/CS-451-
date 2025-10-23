@@ -13,23 +13,27 @@ class Query:
         self.table = table
         pass
 
-    
-    """
-    # internal Method
-    # Read a record with specified RID
-    # Returns True upon succesful deletion
-    # Return False if record doesn't exist or is locked due to 2PL
-    """
+
     def delete(self, primary_key):
+        """
+        # internal Method
+        # Read a record with specified RID
+        # Returns True upon succesful deletion
+        # Return False if record doesn't exist or is locked due to 2PL
+
+        TODO: Whenever a record is deleted from the table, update the index: self.table.index.delete(self.table.key, value, rid)
+        """
         pass
     
-    
-    """
-    # Insert a record with specified columns
-    # Return True upon succesful insertion
-    # Returns False if insert fails for whatever reason
-    """
+
     def insert(self, *columns):
+        """
+        # Insert a record with specified columns
+        # Return True upon succesful insertion
+        # Returns False if insert fails for whatever reason
+
+        TODO: Whenever a new record is inserted into the table, update the index: self.table.index.insert(self.table.key, value, rid)
+        """
         schema_encoding = '0' * self.table.num_columns
         pass
 
@@ -60,13 +64,15 @@ class Query:
     def select_version(self, search_key, search_key_index, projected_columns_index, relative_version):
         pass
 
-    
-    """
-    # Update a record with specified key and columns
-    # Returns True if update is succesful
-    # Returns False if no records exist with given key or if the target record cannot be accessed due to 2PL locking
-    """
+
     def update(self, primary_key, *columns):
+        """
+        # Update a record with specified key and columns
+        # Returns True if update is succesful
+        # Returns False if no records exist with given key or if the target record cannot be accessed due to 2PL locking
+
+        TODO: If the updated column is indexed, you need to update the index: self.table.index.update(column_number, old_value, new_value, rid)
+        """
         pass
 
     
