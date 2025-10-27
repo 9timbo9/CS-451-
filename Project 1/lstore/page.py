@@ -1,4 +1,3 @@
-from table import Record
 
 class Page:
 
