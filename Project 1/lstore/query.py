@@ -101,7 +101,24 @@ class Query:
 
         TODO: If the updated column is indexed, you need to update the index: self.table.index.update(column_number, old_value, new_value, rid)
         """
-        pass
+        try:
+        # make sure caller passed exactly num_columns positional values
+            if len(columns) != self.table.num_columns:
+                return False
+
+            # locate RIDs for a given primary key via its index
+            rids = self.table.index.locate(self.table.key, primary_key)
+            if not rids or any(r is None for r in rids):
+                return False
+            # apply update for each RID
+            for rid in rids:
+                ok = self.table.update_record(rid, *columns)
+                if ok is False:
+                    return False
+
+            return True
+        except Exception:
+            return False
 
     
     """
