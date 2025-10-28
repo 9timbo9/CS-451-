@@ -17,8 +17,7 @@ class Record:
 
 class PageRange:
     """
-    Manages a range of base and tail pages for a portion of the table.
-    Each page range holds a fixed number of records (e.g., 64K records across multiple base pages)
+    Manages a range of base and tail pages
     """
     def __init__(self, num_columns):
         self.num_columns = num_columns  # includes metadata columns
@@ -32,10 +31,12 @@ class PageRange:
         
         self.num_base_records = 0
         self.num_tail_records = 0
-        self.max_records = 512 * 16  # 512 records per page * 16 pages
+        self.max_records = 512 * 16  # 512 records per page times 16 pages
     
-    def has_capacity(self): # check if this is even neccessary
-        """Check if page range can accept more base records"""
+    def has_capacity(self):
+        """
+        Just checking if there is space
+        """
         return self.num_base_records < self.max_records
     
     def write_base_record(self, record_data):
@@ -86,6 +87,9 @@ class PageRange:
         record_data = []
         for col_index in range(self.num_columns):
             # calculate which page and slot within that page
+            # print(offset)
+            # print(offset//512)
+            # print(offset%512)
             page_index = offset // 512 # do ranges even need to have a cap
             slot_in_page = offset % 512
             
@@ -226,12 +230,9 @@ class Table:
         # update RID 1, keep col 0, change col 1 to 200, keep col 2
         """
         Update a record by creating a new tail record
-        columns: list where None means no update for that column
-        Returns True if successful, False otherwise
+        columns: list where None means no change for that column
         """
-        if len(columns) != self.num_columns:
-            raise ValueError(f"Expected {self.num_columns} columns, got {len(columns)}")
-        
+
         base_record = self.read_record(rid)
         if base_record is None:
             return False
@@ -250,11 +251,13 @@ class Table:
         for i, value in enumerate(columns):
             if value is not None:
                 new_schema |= (1 << i)  # weird bit stuff to set bit i to 1
+                #print(new_schema)
                 updated_columns_info.append((i, latest_values[i], value))
         
         tail_data = [prev_tail_rid, tail_rid, int(time()), new_schema] #tail metadata
         
         for i in range(self.num_columns):
+            #print(columns[i])
             if columns[i] is not None: # if column is none then keep old version
                 tail_data.append(columns[i])
             else:
@@ -268,7 +271,6 @@ class Table:
         
         self.page_directory[tail_rid] = (page_range.tail_pages, offset)
         
-        # update base record's indirection to point to new tail
         base_pages, base_offset = self.page_directory[rid]
         page_index = base_offset // 512
         slot_in_page = base_offset % 512
@@ -289,8 +291,8 @@ class Table:
     
     def delete_record(self, rid):
         """
-        Mark a record as deleted by setting RID to DELETED_RID
-        Also update indexes to remove the deleted record
+        Mark a record as deleted by setting RID to DELETED_RID (not actually removing the data yet)
+        Also update indexes to remove the deleted record (only the index)
         """
         if rid not in self.page_directory:
             return False
@@ -313,6 +315,45 @@ class Table:
                 self.index.delete(col_num, value, rid)
         
         return True
+    
+    def get_version(self, rid, relative_version):
+        """
+        Get a specific version of a record (version is a negative number like -2 for 2 versions ago)
+        Returns tuple: (record_data, schema_encoding)
+        record_data contains only the user columns (not metadata)
+        """
+        base_record = self.read_record(rid)
+        if base_record is None:
+            return None, None
+        if relative_version == 0: #0 steps back
+            return self.get_latest_version(rid)
+        
+        # tails rid should be in the indirection column of the base record
+        tail_rid = base_record[INDIRECTION_COLUMN]
+        
+        if tail_rid == 0:
+            return base_record[4:], base_record[SCHEMA_ENCODING_COLUMN]
+        
+        steps = abs(relative_version) # number of steps backwards (versions)
+        curr_tail_rid = tail_rid
+        
+        for i in range(steps):
+            if curr_tail_rid == 0: #same as above
+                break
+            tail_record = self.read_record(curr_tail_rid)
+            #print(tail_record)
+            if tail_record is None:
+                return None, None
+            curr_tail_rid = tail_record[INDIRECTION_COLUMN]
+        
+        # if that number of steps brings you back to the base record
+        if curr_tail_rid == 0:
+            return base_record[4:], base_record[SCHEMA_ENCODING_COLUMN]
+        else:
+            version_record = self.read_record(curr_tail_rid)
+            if version_record is None:
+                return None, None
+            return version_record[4:], version_record[SCHEMA_ENCODING_COLUMN]
 
     def __merge(self):
         print("merge is happening") # ASSIGNMENT 2!!!
