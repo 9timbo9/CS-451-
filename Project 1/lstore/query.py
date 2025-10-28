@@ -17,14 +17,30 @@ class Query:
     def delete(self, primary_key):
         """
         # internal Method
-        # Read a record with specified RID
+        # Delete records matching the primary_key
         # Returns True upon succesful deletion
         # Return False if record doesn't exist or is locked due to 2PL
 
         TODO: Whenever a record is deleted from the table, update the index: self.table.index.delete(self.table.key, value, rid)
         """
-        pass
-    
+        try:
+            rids = self.table.index.locate(self.table.key, primary_key)
+            if not rids or any(r is None for r in rids): #if there's a missing rid then its False
+                return False
+
+            for rid in rids:
+                deleted = self.table.delete_record(rid)
+                if deleted is False:
+                    return False
+                try:
+                    self.table.index.delete(self.table.key, primary_key, rid)
+                except Exception:
+                    # if index deletion fails, treat as failure
+                    return False
+
+            return True
+        except Exception:
+            return False
 
     def insert(self, *columns):
         """
@@ -34,8 +50,20 @@ class Query:
 
         TODO: Whenever a new record is inserted into the table, update the index: self.table.index.insert(self.table.key, value, rid)
         """
-        schema_encoding = '0' * self.table.num_columns
-        pass
+        try:
+            schema_encoding = '0' * self.table.num_columns
+            # call the insert and capture the returned rid 
+            rid = self.table.insert(schema_encoding, *columns)
+            if rid is False or rid is None:
+                #if no rid, then no good
+                return False
+            # gotta update the index for the primary key column
+            key_col = self.table.key
+            key_val = columns[key_col]
+            self.table.index.insert(key_col, key_val, rid)
+            return True
+        except Exception:
+            return False
 
     
     """
