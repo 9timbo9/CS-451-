@@ -8,11 +8,11 @@ class Page:
     def has_capacity(self):
         # each record is 64 bits = 8 bytes
         # 4096 bytes / 8 bytes per record = 512 records
-        print("checking capacity")
+        # print("checking capacity")
         return self.num_records < 512
 
     def write(self, value):
-        print("writing value:", value)
+        # print("writing value:", value)
         if self.has_capacity():
             # get the location to write the new record
             offset = (self.num_records) * 8
@@ -23,7 +23,7 @@ class Page:
             print("Page is full, cannot write more records.")
     
     def read(self, slot_number):
-        print("reading slot number:", slot_number)
+        # print("reading slot number:", slot_number)
         offset = slot_number * 8
         # read 8 bytes and convert back to integer
         value = int.from_bytes(self.data[offset:offset+8], byteorder='little')
