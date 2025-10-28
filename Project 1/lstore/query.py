@@ -29,15 +29,10 @@ class Query:
                 return False
 
             for rid in rids:
-                deleted = self.table.delete_record(rid)
+                deleted = self.table.delete_record(rid) #needs to return true
                 if deleted is False:
                     return False
-                try:
-                    self.table.index.delete(self.table.key, primary_key, rid)
-                except Exception:
-                    # if index deletion fails, treat as failure
-                    return False
-
+                self.table.index.delete(self.table.key, primary_key, rid)
             return True
         except Exception:
             return False
@@ -51,19 +46,15 @@ class Query:
         TODO: Whenever a new record is inserted into the table, update the index: self.table.index.insert(self.table.key, value, rid)
         """
         try:
-            schema_encoding = '0' * self.table.num_columns
-            # call the insert and capture the returned rid 
-            rid = self.table.insert(schema_encoding, *columns)
-            if rid is False or rid is None:
-                #if no rid, then no good
+            rid = self.table.insert(*columns)     # fixed insert by not using schema_encoding 
+            if not rid:
                 return False
-            # gotta update the index for the primary key column
             key_col = self.table.key
-            key_val = columns[key_col]
-            self.table.index.insert(key_col, key_val, rid)
+            self.table.index.insert(key_col, columns[key_col], rid)
             return True
         except Exception:
             return False
+
 
     
     """
@@ -76,9 +67,28 @@ class Query:
     # Assume that select will never be called on a key that doesn't exist
     """
     def select(self, search_key, search_key_index, projected_columns_index):
-        pass
+        try:
+            rids = self.table.index.locate(search_key_index, search_key)
+            if not rids:
+                return []
 
-    
+            results = []
+            for rid in rids:
+                values, _schema = self.table.get_latest_version(rid) #schemas not used but if unassigned stuff goes bad 
+                #pretty sure its needed for next assignment
+                if values is None:
+                    continue
+                # apply projection mask
+                projected = [
+                    v if bit else None
+                    for v, bit in zip(values, projected_columns_index) #mask determining what to select
+                ]
+                results.append(Record(rid, values[self.table.key], projected))
+            return results
+        except Exception:
+            return False
+
+
     """
     # Read matching record with specified search key
     # :param search_key: the value you want to search based on
@@ -91,7 +101,6 @@ class Query:
     """
     def select_version(self, search_key, search_key_index, projected_columns_index, relative_version):
         pass
-
 
     def update(self, primary_key, *columns):
         """
@@ -130,7 +139,21 @@ class Query:
     # Returns False if no record exists in the given range
     """
     def sum(self, start_range, end_range, aggregate_column_index):
-        pass
+        try:
+            # get all rids whose in [start_range, end_range]
+            rids = self.table.index.locate_range(start_range, end_range, self.table.key)
+            if not rids:#classic
+                return False
+            total = 0
+            for rid in rids:
+                values, _ = self.table.get_latest_version(rid)
+                if values is None:
+                    continue
+                total += values[aggregate_column_index]
+            return total
+        except Exception:
+            return False
+
 
     
     """
