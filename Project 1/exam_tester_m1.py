@@ -25,7 +25,7 @@ seed(3562901)
 for i in range(0, number_of_records):
     key = 92106429 + randint(0, number_of_records)
 
-    #skip duplicate keys
+    # skip duplicate keys
     while key in records:
         key = 92106429 + randint(0, number_of_records)
 
@@ -37,8 +37,8 @@ print("Insert finished")
 # Check inserted records using select query
 for key in records:
     # select function will return array of records 
-    # here we are sure that there is only one record in t hat array
-    # check for retreiving version -1. Should retreive version 0 since only one version exists.
+    # here we are sure that there is only one record in that array
+    # check for retrieving version -1. Should retrieve version 0 since only one version exists.
     record = query.select_version(key, 0, [1, 1, 1, 1, 1], -1)[0]
     error = False
     for i, column in enumerate(record.columns):
@@ -62,7 +62,7 @@ for key in records:
         updated_records[key][i] = value
     query.update(key, *updated_columns)
 
-    #check version -1 for record
+    # check version -1 for record
     record = query.select_version(key, 0, [1, 1, 1, 1, 1], -1)[0]
     error = False
     for j, column in enumerate(record.columns):
@@ -74,7 +74,7 @@ for key in records:
         pass
         # print('update on', original, 'and', updated_columns, ':', record)
 
-    #check version -2 for record
+    # check version -2 for record
     record = query.select_version(key, 0, [1, 1, 1, 1, 1], -2)[0]
     error = False
     for j, column in enumerate(record.columns):
@@ -86,7 +86,7 @@ for key in records:
         pass
         # print('update on', original, 'and', updated_columns, ':', record)
     
-    #check version 0 for record
+    # check version 0 for record
     record = query.select_version(key, 0, [1, 1, 1, 1, 1], 0)[0]
     error = False
     for j, column in enumerate(record.columns):

@@ -15,6 +15,13 @@ class Record:
         self.key = key
         self.columns = columns
 
+    def __str__(self):
+        return f"Record(RID={self.rid}, Key={self.key}, Columns={self.columns})"
+
+    def __repr__(self):
+        return self.__str__()
+
+
 class PageRange:
     """
     Manages a range of base and tail pages
@@ -90,7 +97,7 @@ class PageRange:
             # print(offset)
             # print(offset//512)
             # print(offset%512)
-            page_index = offset // 512 # do ranges even need to have a cap
+            page_index = offset // 512  # do ranges even need to have a cap
             slot_in_page = offset % 512
             
             page = self.base_pages[col_index][page_index]
@@ -122,6 +129,7 @@ class PageRange:
         page_offset = slot_in_page * 8
         page.data[page_offset:page_offset+8] = value.to_bytes(8, byteorder='little', signed=(value < 0))
 
+
 class Table:
 
     """
@@ -140,11 +148,17 @@ class Table:
         self.current_page_range = None
         self.current_tail_page_range = None
         self.next_rid = 1
-        self.DELETED_RID = 0 #if rid is 0 then it is deleted
+        self.DELETED_RID = 0  # if rid is 0 then it is deleted
         self.index = Index(self)
-        
+
+    def __str__(self):
+        return f'Table(name="{self.name}", num_columns={self.num_columns}, key={self.key})'
+
+    def __repr__(self):
+        return self.__str__()
+
     def _get_or_create_page_range(self):
-        """Get current page range or create new one if full""" # CHANGE !!!
+        """Get current page range or create new one if full"""  # CHANGE !!!
         if self.current_page_range is None or not self.current_page_range.has_capacity():
             self.current_page_range = PageRange(self.total_columns)
             self.page_ranges.append(self.current_page_range)
@@ -160,7 +174,7 @@ class Table:
         rid = self.next_rid
         self.next_rid += 1
         
-        indirection = 0 #no tail records
+        indirection = 0  # no tail records
         timestamp = int(time())
         schema_encoding = 0
         
@@ -207,9 +221,9 @@ class Table:
         """
         Get the latest version of a record by following the indirection chain
         Returns tuple: (record_data, schema_encoding)
-        record_data contains only the actua columns (not metadata)
+        record_data contains only the actual columns (not metadata)
         """
-        base_record = self.read_record(rid) #if it exists
+        base_record = self.read_record(rid)  # if it exists
         if base_record is None:
             return None, None
         
@@ -251,13 +265,13 @@ class Table:
         for i, value in enumerate(columns):
             if value is not None:
                 new_schema |= (1 << i)  # weird bit stuff to set bit i to 1
-                #print(new_schema)
+                # print(new_schema)
                 updated_columns_info.append((i, latest_values[i], value))
         
-        tail_data = [prev_tail_rid, tail_rid, int(time()), new_schema] #tail metadata
+        tail_data = [prev_tail_rid, tail_rid, int(time()), new_schema]  # tail metadata
         
         for i in range(self.num_columns):
-            #print(columns[i])
+            # print(columns[i])
             if columns[i] is not None: # if column is none then keep old version
                 tail_data.append(columns[i])
             else:
@@ -325,7 +339,7 @@ class Table:
         base_record = self.read_record(rid)
         if base_record is None:
             return None, None
-        if relative_version == 0: #0 steps back
+        if relative_version == 0:  # 0 steps back
             return self.get_latest_version(rid)
         
         # tails rid should be in the indirection column of the base record
@@ -334,14 +348,14 @@ class Table:
         if tail_rid == 0:
             return base_record[4:], base_record[SCHEMA_ENCODING_COLUMN]
         
-        steps = abs(relative_version) # number of steps backwards (versions)
+        steps = abs(relative_version)  # number of steps backwards (versions)
         curr_tail_rid = tail_rid
         
         for i in range(steps):
-            if curr_tail_rid == 0: #same as above
+            if curr_tail_rid == 0:  # same as above
                 break
             tail_record = self.read_record(curr_tail_rid)
-            #print(tail_record)
+            # print(tail_record)
             if tail_record is None:
                 return None, None
             curr_tail_rid = tail_record[INDIRECTION_COLUMN]
@@ -356,6 +370,5 @@ class Table:
             return version_record[4:], version_record[SCHEMA_ENCODING_COLUMN]
 
     def __merge(self):
-        print("merge is happening") # ASSIGNMENT 2!!!
+        print("merge is happening")  # ASSIGNMENT 2!!!
         pass
- 

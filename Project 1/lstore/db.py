@@ -6,6 +6,12 @@ class Database:
     def __init__(self):
         self.tables = {}  # Store tables by name
 
+    def __str__(self):
+        return f"Database(tables={list(self.tables.keys())})"
+
+    def __repr__(self):
+        return self.__str__()
+
     # Not required for milestone1
     def open(self, path):
         pass
