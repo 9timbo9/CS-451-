@@ -100,7 +100,29 @@ class Query:
     # Assume that select will never be called on a key that doesn't exist
     """
     def select_version(self, search_key, search_key_index, projected_columns_index, relative_version):
-        pass
+        try:
+            # RIDs with matching search key
+            rids = self.table.index.locate(search_key_index, search_key)
+            if not rids:
+                return []
+
+            results = []
+            for rid in rids:
+                values, _schema = self.table.get_version(rid, relative_version) #same thing except we get specific version
+                if values is None:
+                    continue
+
+                projected = [
+                    v if bit else None
+                    for v, bit in zip(values, projected_columns_index)
+                ]
+
+                results.append(Record(rid, values[self.table.key], projected))
+
+            return results if results else []
+        except Exception:
+            return False
+
 
     def update(self, primary_key, *columns):
         """
@@ -146,7 +168,7 @@ class Query:
                 return False
             total = 0
             for rid in rids:
-                values, _ = self.table.get_latest_version(rid)
+                values, _ = self.table.get_latest_version(rid) #summation
                 if values is None:
                     continue
                 total += values[aggregate_column_index]
@@ -166,7 +188,20 @@ class Query:
     # Returns False if no record exists in the given range
     """
     def sum_version(self, start_range, end_range, aggregate_column_index, relative_version):
-        pass
+        try:
+            # get all rids whose in [start_range, end_range]
+            rids = self.table.index.locate_range(start_range, end_range, self.table.key)
+            if not rids:#classic
+                return False
+            total = 0
+            for rid in rids:
+                values, _ = self.table.get_version(rid, relative_version) #using get_getversion instead of latest to get specific version
+                if values is None:
+                    continue
+                total += values[aggregate_column_index] #summation
+            return total
+        except Exception:
+            return False
 
     
     """
