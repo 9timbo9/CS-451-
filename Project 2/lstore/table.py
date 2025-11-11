@@ -170,6 +170,9 @@ class Table:
         """
         if len(columns) != self.num_columns:
             raise ValueError(f"Expected {self.num_columns} columns, got {len(columns)}")
+
+        if self.index.locate(self.key, columns[self.key]):
+            raise ValueError(f"Duplicate entry for primary key column {self.key} with value {columns[self.key]}")
         
         rid = self.next_rid
         self.next_rid += 1

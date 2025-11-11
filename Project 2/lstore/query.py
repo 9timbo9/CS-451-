@@ -122,6 +122,10 @@ class Query:
             if len(columns) != self.table.num_columns:
                 return False
 
+            # cannot update primary key via update
+            if columns[self.table.key] is not None and columns[self.table.key] != primary_key:
+                return False
+
             # locate RIDs for a given primary key via its index
             rids = self.table.index.locate(self.table.key, primary_key)
             if not rids or any(r is None for r in rids):
