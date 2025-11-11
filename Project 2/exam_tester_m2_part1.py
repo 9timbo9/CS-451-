@@ -4,7 +4,7 @@ from lstore.query import Query
 from random import choice, randint, sample, seed
 
 db = Database()
-db.open('./CS451')
+db.open('./CS451', delete_existing=True)  # Delete existing db for debugging
 # Create a table  with 5 columns
 #   Student Id and 4 grades
 #   The first argument is name of the table
