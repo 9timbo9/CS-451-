@@ -1,3 +1,6 @@
+from lstore.config import INDIRECTION_COLUMN
+
+
 class Index:
     """
     A data structure holding indices for various columns of a table. Key column should be indexed by default,
@@ -5,11 +8,13 @@ class Index:
     used as well.
     """
 
-    def __init__(self, table):
+    def __init__(self, table, create_index):
         self.table = table
         self.indices = [None] * table.num_columns  # One index for each table. All are empty initially.
+        # TODO: Hash table that stores pointers to B+ trees for each indexed column
         # An index looks like {value: {rid1, rid2, ...}}
-        self.create_index(table.key)  # Key column should be indexed by default
+        if create_index:
+            self.create_index(table.key)  # Key column should be indexed by default
 
     def create_index(self, column_number):
         """
@@ -19,9 +24,27 @@ class Index:
             return  # index already exists for this column
         idx = {}  # {value: {rid1, rid2, ...}}
         self.indices[column_number] = idx  # add index to indices list
-        # populate the index if there are existing records
+        # First, collect all tail RIDs by scanning base records' indirection columns
+        tail_rids = set()
         for rid, (pages, offset) in self.table.page_directory.items():
-            value = pages[column_number].read(offset)  # read the value from the page
+            record = self.table.read_record(rid)
+            if record is None:
+                continue  # skip deleted records
+            # Check if this is a base record
+            indirection_rid = record[INDIRECTION_COLUMN]
+            if indirection_rid != 0:  # if indirection is non-zero, it's a tail record
+                tail_rids.add(indirection_rid)
+        # Populate the index, only process base records
+        for rid, (pages, offset) in self.table.page_directory.items():
+            if rid in tail_rids:
+                continue  # Skip tail records
+            record = self.table.read_record(rid)
+            if record is None:
+                continue  # skip deleted records
+            latest_values, _ = self.table.get_latest_version(rid)  # Get the latest record version
+            if latest_values is None:
+                continue  # skip if we can't get the latest version
+            value = latest_values[column_number]
             if value not in idx:
                 idx[value] = set()  # if the value isn't in the index yet, create a new set
             idx[value].add(rid)  # add the rid to the set for this value

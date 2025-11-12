@@ -1,5 +1,6 @@
 from lstore.table import Table, PageRange
 from lstore.page import Page
+from lstore.index import Index
 import os
 import struct
 
@@ -190,7 +191,7 @@ class Database:
             key_idx = struct.unpack(UNSIGNED_SHORT, f.read(2))[0]
             next_rid = struct.unpack(UNSIGNED_INT, f.read(4))[0]
             # Create table
-            table = Table(table_name, num_col, key_idx)
+            table = Table(table_name, num_col, key_idx, create_index=False)
             table.next_rid = next_rid
             # Read number of page ranges
             num_page_ranges = struct.unpack(UNSIGNED_INT, f.read(4))[0]
@@ -227,4 +228,5 @@ class Database:
                 else:
                     # All are full, will create a new one on next update
                     table.current_tail_page_range = table.page_ranges[-1]
+            table.index = Index(table, create_index=True)
             self.tables[table_name] = table
