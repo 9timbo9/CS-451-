@@ -133,7 +133,7 @@ class Table:
     :param num_columns: int     #Number of Columns: all columns are integer
     :param key: int             #Index of table key in columns
     """
-    def __init__(self, name, num_columns, key, create_index=True):
+    def __init__(self, name, num_columns, key, create_index=True, bufferpool=None):
         self.name = name
         self.key = key
         self.num_columns = num_columns
@@ -145,6 +145,7 @@ class Table:
         self.current_tail_page_range = None
         self.next_rid = 1
         self.DELETED_RID = 0  # if rid is 0 then it is deleted
+        self.bufferpool = bufferpool  # TODO: bufferpool integration
         self.index = Index(self, create_index)
 
     def __str__(self):

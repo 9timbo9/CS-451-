@@ -2,18 +2,16 @@ from collections import OrderedDict
 from lstore.page import Page
 
 
-
 class Bufferpool:
 
     def __init__(self, disk_manager, capacity):
         self.disk = disk_manager
         self.capacity = capacity
 
-        self.frames = {} # page_id = {"page": Page, "pin": int, "dirty": bool}
-        
+        self.frames = {}  # page_id = {"page": Page, "pin": int, "dirty": bool}
 
         # Imma go with a LRU, 
-        self.lru = OrderedDict() #ordereddict LRU solution 
+        self.lru = OrderedDict()  # ordereddict LRU solution
 
     def fix_page(self, page_id, mode="r"):
         """
@@ -67,10 +65,10 @@ class Bufferpool:
             return
 
         table, is_tail, col, rng, idx = page_id
-        self.disk.write_page(table, is_tail, col, rng, idx, frame["page"].data) #update new stuff writes on disk
-        frame["dirty"] = False #clean now
+        self.disk.write_page(table, is_tail, col, rng, idx, frame["page"].data)  # update new stuff writes on disk
+        frame["dirty"] = False  # clean now
 
-    def flush_all(self):#call this at close() in db to 
+    def flush_all(self):  # call this at close() in db to
         for pid in list(self.frames.keys()):
             self.flush(pid)
 
