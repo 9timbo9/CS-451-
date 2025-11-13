@@ -21,7 +21,7 @@ class Page:
             offset = (self.num_records) * 8
             self.data[offset:offset+8] = value.to_bytes(8, byteorder='little')
             self.num_records += 1
-            self.mark_dirty()
+            self.set_dirty()
         else:
             # print("Page is full, cannot write more records.")
             return
@@ -64,14 +64,14 @@ class Page:
     def set_tps(self, tps_value):
         """Update TPS after merge completion"""
         self.tps = tps_value
-        self.mark_dirty()
+        self.set_dirty()
     
     def update(self, slot_number, value):
         """Update existing record at slot_number"""
         if slot_number < self.num_records:
             offset = slot_number * 8
             self.data[offset:offset+8] = value.to_bytes(8, byteorder='little')
-            self.mark_dirty()
+            self.set_dirty()
             return True
         return False
     
