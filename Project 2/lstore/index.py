@@ -1,4 +1,23 @@
 from lstore.config import INDIRECTION_COLUMN
+from sortedcontainers import SortedDict
+
+
+class IndexNode:
+    """
+    A node in a doubly linked list used by the index. Holds a value, a set of RIDs for that
+    value, and pointers to the next and previous nodes in sorted order.
+    """
+    def __init__(self, value):
+        self.value = value
+        self.rids = set()
+        self.next = None
+        self.prev = None
+
+    def __str__(self):
+        return f"IndexNode(value={self.value}, rids={self.rids})"
+
+    def __repr__(self):
+        return self.__str__()
 
 
 class Index:
@@ -11,8 +30,7 @@ class Index:
     def __init__(self, table, create_index):
         self.table = table
         self.indices = [None] * table.num_columns  # One index for each table. All are empty initially.
-        # TODO: Hash table that stores pointers to B+ trees for each indexed column
-        # An index looks like {value: {rid1, rid2, ...}}
+        # Each column has an index structure: tuple(idx_map: dict, head: IndexNode, tail: indexNode) or None if no index
         if create_index:
             self.create_index(table.key)  # Key column should be indexed by default
 
@@ -22,8 +40,9 @@ class Index:
         """
         if self.indices[column_number] is not None:
             return  # index already exists for this column
-        idx = {}  # {value: {rid1, rid2, ...}}
-        self.indices[column_number] = idx  # add index to indices list
+        idx_map = {}
+        head = None
+        tail = None
         # First, collect all tail RIDs by scanning base records' indirection columns
         tail_rids = set()
         for rid, (pages, offset) in self.table.page_directory.items():
@@ -34,7 +53,8 @@ class Index:
             indirection_rid = record[INDIRECTION_COLUMN]
             if indirection_rid != 0:  # if indirection is non-zero, it's a tail record
                 tail_rids.add(indirection_rid)
-        # Populate the index, only process base records
+        # Collect all values and their RIDs from the table, skipping tail records
+        temp_idx_map = SortedDict()
         for rid, (pages, offset) in self.table.page_directory.items():
             if rid in tail_rids:
                 continue  # Skip tail records
@@ -45,9 +65,25 @@ class Index:
             if latest_values is None:
                 continue  # skip if we can't get the latest version
             value = latest_values[column_number]
-            if value not in idx:
-                idx[value] = set()  # if the value isn't in the index yet, create a new set
-            idx[value].add(rid)  # add the rid to the set for this value
+            if value not in temp_idx_map:
+                temp_idx_map[value] = set()
+            temp_idx_map[value].add(rid)
+        # Build doubly LL from map
+        last_node = None
+        for key in temp_idx_map:
+            # Create new node and populate RIDs
+            node = IndexNode(key)
+            node.rids.update(temp_idx_map[key])
+            idx_map[key] = node
+            # Link node into the list
+            if last_node is None:
+                head = node
+            else:
+                last_node.next = node
+                node.prev = last_node
+            last_node = node
+        tail = last_node
+        self.indices[column_number] = (idx_map, head, tail)
 
     def drop_index(self, column_number):
         """
@@ -61,22 +97,31 @@ class Index:
         """
         returns the location of all records with the given value on column "column"
         """
-        idx = self.indices[column]
-        if idx is None:
+        column_index = self.indices[column]
+        if column_index is None:
             return set()  # if we haven't created an index for this column, return empty set
-        return idx.get(value, set())  # return the set of RIDs for this value, or empty set if value not found
+        idx_map, head, tail = column_index
+        node = idx_map.get(value)
+        if node:
+            return node.rids
+        return set()
 
     def locate_range(self, begin, end, column):
         """
         Returns the RIDs of all records with values in column "column" between "begin" and "end" (inclusive)
         """
-        idx = self.indices[column]
+        column_index = self.indices[column]
         result = set()
-        if idx is None:
+        if column_index is None:
             return result  # we haven't created an index for this column
-        for value, rids in idx.items():
-            if begin <= value <= end:
-                result.update(rids)  # add all RIDs for this value to the result set
+        idx_map, head, tail = column_index
+        cur_node = head
+        # TODO: optimize by binary search
+        while cur_node and cur_node.value < begin:
+            cur_node = cur_node.next
+        while cur_node and cur_node.value <= end:
+            result.update(cur_node.rids)
+            cur_node = cur_node.next
         return result
 
     def insert(self, column, value, rid):
@@ -84,25 +129,66 @@ class Index:
         Inserts a value into the index for the specified column.
         Should be called whenever a new record is inserted into the table.
         """
-        idx = self.indices[column]
-        if idx is None:
+        column_index = self.indices[column]
+        if column_index is None:
             return  # index does not exist for this column
-        if value not in idx:
-            idx[value] = set()
-        idx[value].add(rid)
+        idx_map, head, tail = column_index
+        if value in idx_map:  # Value already exists in index
+            node = idx_map[value]
+            node.rids.add(rid)
+            return
+        # New value needs to be inserted
+        node = IndexNode(value)
+        node.rids.add(rid)
+        idx_map[value] = node
+        # Insert into LL in sorted order
+        if head is None:  # empty list
+            head = tail = node
+        elif value < head.value:  # insert at head
+            node.next = head
+            head.prev = node
+            head = node
+        elif value > tail.value:  # insert at tail
+            tail.next = node
+            node.prev = tail
+            tail = node
+        else:  # insert in middle
+            # TODO: optimize by binary search
+            cur_node = head
+            while cur_node.value < value:
+                cur_node = cur_node.next
+            # Insert before cur_node
+            prev_node = cur_node.prev
+            prev_node.next = node
+            node.prev = prev_node
+            node.next = cur_node
+            cur_node.prev = node
+        self.indices[column] = (idx_map, head, tail)  # update index
 
     def delete(self, column, value, rid):
         """
         Deletes a record's RID from the index for the specified column.
         Should be called whenever a record is deleted from the table.
         """
-        idx = self.indices[column]
-        if idx is None:
+        column_index = self.indices[column]
+        if column_index is None:
             return  # index does not exist for this column
-        if value in idx:
-            idx[value].discard(rid)
-            if not idx[value]:  # if the set is now empty, remove the entry from the index
-                del idx[value]
+        idx_map, head, tail = column_index
+        node_to_update = idx_map.get(value)
+        if not node_to_update:
+            return  # value not found in index
+        node_to_update.rids.discard(rid)
+        if not node_to_update.rids:  # If node is not empty, remove it
+            if node_to_update.prev:  # unlink from list
+                node_to_update.prev.next = node_to_update.next
+            else:  # it was the head
+                head = node_to_update.next
+            if node_to_update.next:
+                node_to_update.next.prev = node_to_update.prev
+            else:  # it was the tail
+                tail = node_to_update.prev
+            del idx_map[value]  # remove from map
+            self.indices[column] = (idx_map, head, tail)  # update index
 
     def update(self, column, old_value, new_value, rid):
         """
