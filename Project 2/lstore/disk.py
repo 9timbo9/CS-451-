@@ -31,3 +31,18 @@ class DiskManager:
         path = self.page_path(table, is_tail, col, rng, idx) #used for dirty pages, for example
         with open(path, "wb") as f:
             f.write(bytes(buf[:PAGE_SIZE]))
+
+    def meta_path(self, table_name):
+        return os.path.join(self.table_dir(table_name), "meta.json") #return file that holds meta data
+
+    def write_meta(self, table_name, meta: dict):
+        os.makedirs(self.table_dir(table_name), exist_ok=True)
+        with open(self.meta_path(table_name), "w") as f:
+            json.dump(meta, f) #writing to meta if it exists
+
+    def read_meta(self, table_name): #reading from correct meta page
+        path = self.meta_path(table_name)
+        if not os.path.exists(path):
+            return None
+        with open(path, "r") as f:
+            return json.load(f)
