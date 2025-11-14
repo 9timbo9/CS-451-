@@ -48,34 +48,56 @@ class Query:
 
     def select(self, search_key, search_key_index, projected_columns_index):
         """
-        # Read matching record with specified search key
-        # :param search_key: the value you want to search based on
-        # :param search_key_index: the column index you want to search based on
-        # :param projected_columns_index: what columns to return. array of 1 or 0 values.
-        # Returns a list of Record objects upon success
-        # Returns False if record locked by TPL
-        # Assume that select will never be called on a key that doesn't exist
+        Read matching records with specified search key.
+
+        :param search_key: the value you want to search based on
+        :param search_key_index: the column index you want to search based on (user columns)
+        :param projected_columns_index: which columns to return (list of 0/1)
+        Returns a list of Record objects upon success.
+        Returns [] if nothing matches.
+        Returns False if something exceptional happens.
         """
         try:
-            rids = self.table.index.locate(search_key_index, search_key)
-            if not rids:
-                return []
-
             results = []
+
+            # 1) Try using an index if it exists on this column
+            rids = set()
+            if 0 <= search_key_index < self.table.num_columns:
+                col_index_struct = self.table.index.indices[search_key_index]
+            else:
+                col_index_struct = None
+
+            if col_index_struct is not None:
+                rids = self.table.index.locate(search_key_index, search_key)
+
+            # 2) Fallback: full scan of base records if index finds nothing
+            if not rids:
+                for rid, (range_idx, is_tail, offset) in self.table.page_directory.items():
+                    if is_tail:
+                        continue  # logical records are base RIDs only
+                    values, _schema = self.table.get_latest_version(rid)
+                    if values is None:
+                        continue
+                    if values[search_key_index] == search_key:
+                        rids.add(rid)
+
+            # 3) Build Record objects for all matching RIDs
             for rid in rids:
-                values, _schema = self.table.get_latest_version(rid)  # schemas not used but if unassigned stuff goes bad
-                # pretty sure it's needed for next assignment
+                values, _schema = self.table.get_latest_version(rid)
                 if values is None:
                     continue
-                # apply projection mask
+
                 projected = [
                     v if bit else None
-                    for v, bit in zip(values, projected_columns_index)  # mask determining what to select
+                    for v, bit in zip(values, projected_columns_index)
                 ]
+
                 results.append(Record(rid, values[self.table.key], projected))
+
             return results
         except Exception:
             return False
+
 
     def select_version(self, search_key, search_key_index, projected_columns_index, relative_version):
         """
@@ -193,15 +215,22 @@ class Query:
         """
         increments one column of the record
         this implementation should work if your select and update queries already work
-        :param key: the primary of key of the record to increment
+        :param key: the primary key of the record to increment
         :param column: the column to increment
-        # Returns True is increment is successful
+        # Returns True if increment is successful
         # Returns False if no record matches key or if target record is locked by 2PL.
         """
-        r = self.select(key, self.table.key, [1] * self.table.num_columns)[0]
-        if r is not False:
+        try:
+            records = self.select(key, self.table.key, [1] * self.table.num_columns)
+            if records is False or not records:
+                return False
+
+            r = records[0]        # Record object
+            current_val = r.columns[column]
+
             updated_columns = [None] * self.table.num_columns
-            updated_columns[column] = r[column] + 1
-            u = self.update(key, *updated_columns)
-            return u
-        return False
+            updated_columns[column] = current_val + 1
+
+            return self.update(key, *updated_columns)
+        except Exception:
+            return False

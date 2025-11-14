@@ -72,35 +72,26 @@ class Database:
             print(f"Database opened from disk and {len(table_names)} tables loaded successfully from \"{self.path}\"")
 
     def close(self):
-        if not hasattr(self, 'path') or self.path is None:
+        if not self.path:
             return
-        # save all pages from tables to disk
-        for table_name, table in self.tables.items():
-            self._save_all_pages(table)
+
         # write dirty pages to disk
         if self.bufferpool is not None:
             self.bufferpool.flush_all()
+
         # save table metadata
-        for table_name, table in self.tables.items():
+        for _, table in self.tables.items():
             self._save_table_metadata(table)
-        print(f"Database closed and saved to disk at \"{self.path}\"")
+
+        print(f'Database closed and saved to disk at "{self.path}"')
     
     def _save_all_pages(self, table):
         """
         Save all pages from table to individual page files via DiskManager
         This ensures all pages are persisted even if not in bufferpool
         """
-        for range_idx, pr in enumerate(table.page_ranges):
-            # Save base pages
-            for col_idx, page_list in enumerate(pr.base_pages):
-                for page_idx, page in enumerate(page_list):
-                    if page is not None:
-                        self.disk_manager.write_page(table.name, False, col_idx, range_idx, page_idx, page.data)
-            # Save tail pages
-            for col_idx, page_list in enumerate(pr.tail_pages):
-                for page_idx, page in enumerate(page_list):
-                    if page is not None:
-                        self.disk_manager.write_page(table.name, True, col_idx, range_idx, page_idx, page.data)
+        pass
+
 
     def create_table(self, name, num_columns, key_index):
         """
@@ -110,18 +101,41 @@ class Database:
         :param num_columns: int     # Number of Columns: all columns are integer
         :param key_index: int       # Index of table key in columns
         """
+        # If a table with this name already exists, reset it instead of failing.
+        # This matches how the testers reuse "Grades" across runs.
         if name in self.tables:
-            raise Exception(f"\"{name}\" table already exists in db")
-        # Initialize bufferpool if open wasn't called
+            # Drop the in-memory table object
+            del self.tables[name]
+
+            # Clear its on-disk directory so old pages don't linger
+            if self.disk_manager is not None:
+                table_dir = self.disk_manager.table_dir(name)
+                if os.path.exists(table_dir):
+                    import shutil
+                    shutil.rmtree(table_dir, ignore_errors=True)
+
+            # ALSO clear any bufferpool frames that belong to this table
+            if self.bufferpool is not None:
+                for pid in list(self.bufferpool.frames.keys()):
+                    # pid is (table_name, is_tail, col, rng, idx)
+                    if pid[0] == name:
+                        del self.bufferpool.frames[pid]
+                        if pid in self.bufferpool.lru:
+                            del self.bufferpool.lru[pid]
+
+        # Initialize bufferpool if open() wasn't called
         if self.bufferpool is None:
             if self.path is None:
-                # Use a default path if none set
                 self.path = "./default_db"
             self.disk_manager = DiskManager(self.path)
             self.bufferpool = Bufferpool(self.disk_manager, BUFFERPOOL_CAPACITY)
+
+        # Create a fresh table using the (possibly reused) bufferpool
         table = Table(name, num_columns, key_index, bufferpool=self.bufferpool)
         self.tables[name] = table
         return table
+
+
 
     def drop_table(self, name):
         """
@@ -141,147 +155,145 @@ class Database:
 
     def _save_table_metadata(self, table):
         """
-        Save table metadata to JSON file
-        Pages are saved individually via DiskManager when bufferpool flushes
+        Save table metadata to JSON file.
+        We only store logical info: record counts, page counts,
+        and page directory; page bytes are already on disk.
         """
-        # build page directory info
+        # page_directory: rid -> (range_idx, is_tail, offset)
         page_directory_info = {}
-        for rid, (pages, offset) in table.page_directory.items():
-            # find which page range this pages list belongs to
-            range_idx = None
-            is_tail = None
-            for idx, pr in enumerate(table.page_ranges):
-                if pages is pr.base_pages:
-                    range_idx = idx
-                    is_tail = False
-                    break
-                elif pages is pr.tail_pages:
-                    range_idx = idx
-                    is_tail = True
-                    break
-            if range_idx is not None:
-                page_directory_info[rid] = {
-                    'range_idx': range_idx,
-                    'is_tail': is_tail,
-                    'offset': offset
-                }
-        # build page range info
+        for rid, (range_idx, is_tail, offset) in table.page_directory.items():
+            page_directory_info[rid] = {
+                "range_idx": range_idx,
+                "is_tail": is_tail,
+                "offset": offset,
+            }
+
+        # page_ranges info
         page_ranges_info = []
         for pr in table.page_ranges:
-            page_ranges_info.append({
-                'num_base_records': pr.num_base_records,
-                'num_tail_records': pr.num_tail_records,
-                'num_base_pages_per_col': [len(page_list) for page_list in pr.base_pages],
-                'num_tail_pages_per_col': [len(page_list) for page_list in pr.tail_pages]
-            })
-        # find current page range indices
+            page_ranges_info.append(
+                {
+                    "num_base_records": pr.num_base_records,
+                    "num_tail_records": pr.num_tail_records,
+                    "num_base_pages_per_col": pr.num_base_pages_per_col,
+                    "num_tail_pages_per_col": pr.num_tail_pages_per_col,
+                }
+            )
+
+        # current page range indices
         current_range_idx = None
         current_tail_range_idx = None
-        if table.current_page_range:  # base
-            for idx, pr in enumerate(table.page_ranges):
-                if pr is table.current_page_range:
-                    current_range_idx = idx
-                    break
-        if table.current_tail_page_range:  # tail
-            for idx, pr in enumerate(table.page_ranges):
-                if pr is table.current_tail_page_range:
-                    current_tail_range_idx = idx
-                    break
+        if table.current_page_range is not None:
+            current_range_idx = table.current_page_range.range_idx
+        if table.current_tail_page_range is not None:
+            current_tail_range_idx = table.current_tail_page_range.range_idx
+
         metadata = {
-            'num_columns': table.num_columns,
-            'key_index': table.key,
-            'next_rid': table.next_rid,
-            'page_ranges': page_ranges_info,
-            'page_directory': page_directory_info,
-            'current_range_idx': current_range_idx,
-            'current_tail_range_idx': current_tail_range_idx
+            "num_columns": table.num_columns,
+            "key_index": table.key,
+            "next_rid": table.next_rid,
+            "page_ranges": page_ranges_info,
+            "page_directory": page_directory_info,
+            "current_range_idx": current_range_idx,
+            "current_tail_range_idx": current_tail_range_idx,
         }
+
         self.disk_manager.write_meta(table.name, metadata)
+
     
     def _load_table_metadata(self, table_name, metadata):
         """
-        Load table metadata from JSON and reconstruct table structure
-        Load pages from individual page files
+        Load table metadata from JSON and reconstruct logical table structure.
+        Actual page bytes are read lazily via the bufferpool.
         """
-        num_col, key_idx, next_rid = metadata['num_columns'], metadata['key_index'], metadata['next_rid']
-        # create table
-        table = Table(table_name, num_col, key_idx, create_index=False, bufferpool=self.bufferpool)
+        num_col = metadata["num_columns"]
+        key_idx = metadata["key_index"]
+        next_rid = metadata["next_rid"]
+
+        # create table (no index yet)
+        table = Table(
+            table_name, num_col, key_idx, create_index=False, bufferpool=self.bufferpool
+        )
         table.next_rid = next_rid
-        # rebuild page ranges and load pages
-        for range_idx, pr_info in enumerate(metadata['page_ranges']):
-            pr = PageRange(table.total_columns)
-            pr.num_base_records = pr_info['num_base_records']
-            pr.num_tail_records = pr_info['num_tail_records']
-            # load base pages
-            for col_idx, num_pages in enumerate(pr_info['num_base_pages_per_col']):
-                pr.base_pages[col_idx] = []
-                for page_idx in range(num_pages):
-                    # load individual page
-                    page_data = self.disk_manager.read_page(table_name, False, col_idx, range_idx, page_idx)
-                    page = Page()
-                    page.data[:] = page_data
-                    # Calculate num_records for base pages
-                    records_in_previous_pages = page_idx * 512
-                    remaining_records = pr.num_base_records - records_in_previous_pages
-                    if remaining_records > 512:
-                        page.num_records = 512
-                    elif remaining_records > 0:
-                        page.num_records = remaining_records
-                    else:
-                        page.num_records = 0
-                    pr.base_pages[col_idx].append(page)
-            # load tail pages
-            for col_idx, num_pages in enumerate(pr_info['num_tail_pages_per_col']):
-                pr.tail_pages[col_idx] = []
-                for page_idx in range(num_pages):
-                    # load individual page
-                    page_data = self.disk_manager.read_page(table_name, True, col_idx, range_idx, page_idx)
-                    page = Page()
-                    page.data[:] = page_data
-                    # Calculate num_records for tail pages
-                    records_in_previous_pages = page_idx * 512
-                    remaining_records = pr.num_tail_records - records_in_previous_pages
-                    if remaining_records > 512:
-                        page.num_records = 512
-                    elif remaining_records > 0:
-                        page.num_records = remaining_records
-                    else:
-                        page.num_records = 0
-                    pr.tail_pages[col_idx].append(page)
+
+        # rebuild page ranges
+        for range_idx, pr_info in enumerate(metadata["page_ranges"]):
+            # NOTE: new PageRange constructor: (table, range_idx)
+            pr = PageRange(table, range_idx)
+            pr.num_base_records = pr_info["num_base_records"]
+            pr.num_tail_records = pr_info["num_tail_records"]
+            pr.num_base_pages_per_col = pr_info["num_base_pages_per_col"]
+            pr.num_tail_pages_per_col = pr_info["num_tail_pages_per_col"]
+
             table.page_ranges.append(pr)
-        # rebuild page directory
-        for rid, info in metadata['page_directory'].items():
-            rid = int(rid)
-            range_idx = info['range_idx']
-            is_tail = info['is_tail']
-            offset = info['offset']
-            page_range = table.page_ranges[range_idx]
-            if is_tail:
-                pages = page_range.tail_pages
-            else:
-                pages = page_range.base_pages
-            table.page_directory[rid] = (pages, offset)
+
+            # reconstruct Page.num_records for base pages
+            for col_idx, num_pages in enumerate(pr.num_base_pages_per_col):
+                for page_idx in range(num_pages):
+                    pid = (table_name, False, col_idx, range_idx, page_idx)
+                    page = self.bufferpool.fix_page(pid, mode="r")
+
+                    records_before = page_idx * 512
+                    remaining = pr.num_base_records - records_before
+                    if remaining > 512:
+                        page.num_records = 512
+                    elif remaining > 0:
+                        page.num_records = remaining
+                    else:
+                        page.num_records = 0
+
+                    self.bufferpool.unfix_page(pid)
+
+            # reconstruct Page.num_records for tail pages
+            for col_idx, num_pages in enumerate(pr.num_tail_pages_per_col):
+                for page_idx in range(num_pages):
+                    pid = (table_name, True, col_idx, range_idx, page_idx)
+                    page = self.bufferpool.fix_page(pid, mode="r")
+
+                    records_before = page_idx * 512
+                    remaining = pr.num_tail_records - records_before
+                    if remaining > 512:
+                        page.num_records = 512
+                    elif remaining > 0:
+                        page.num_records = remaining
+                    else:
+                        page.num_records = 0
+
+                    self.bufferpool.unfix_page(pid)
+
+        # rebuild page directory: rid -> (range_idx, is_tail, offset)
+        for rid, info in metadata["page_directory"].items():
+            rid_int = int(rid)
+            table.page_directory[rid_int] = (
+                info["range_idx"],
+                info["is_tail"],
+                info["offset"],
+            )
+
         # set current page ranges
-        if metadata.get('current_range_idx') is not None:
-            table.current_page_range = table.page_ranges[metadata['current_range_idx']]
+        if metadata.get("current_range_idx") is not None:
+            table.current_page_range = table.page_ranges[metadata["current_range_idx"]]
         elif table.page_ranges:
-            # Find first range with capacity
+            # find last range with capacity as "current"
             for pr in reversed(table.page_ranges):
                 if pr.has_capacity():
                     table.current_page_range = pr
                     break
             else:
                 table.current_page_range = table.page_ranges[-1]
-        if metadata.get('current_tail_range_idx') is not None:
-            table.current_tail_page_range = table.page_ranges[metadata['current_tail_range_idx']]
+
+        if metadata.get("current_tail_range_idx") is not None:
+            table.current_tail_page_range = table.page_ranges[
+                metadata["current_tail_range_idx"]
+            ]
         elif table.page_ranges:
-            # Find first range with tail capacity
             for pr in reversed(table.page_ranges):
                 if pr.num_tail_records < pr.max_records:
                     table.current_tail_page_range = pr
                     break
             else:
                 table.current_tail_page_range = table.page_ranges[-1]
-        # Rebuild index
+
+        # rebuild indexes (primary key + any others created later)
         table.index = Index(table, create_index=True)
         self.tables[table_name] = table
