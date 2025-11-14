@@ -6,7 +6,6 @@ from lstore.bufferpool import Bufferpool
 from lstore.config import BUFFERPOOL_CAPACITY
 import os
 import shutil
-# import json
 
 
 class Database:
@@ -84,14 +83,6 @@ class Database:
             self._save_table_metadata(table)
 
         print(f'Database closed and saved to disk at "{self.path}"')
-    
-    def _save_all_pages(self, table):
-        """
-        Save all pages from table to individual page files via DiskManager
-        This ensures all pages are persisted even if not in bufferpool
-        """
-        pass
-
 
     def create_table(self, name, num_columns, key_index):
         """
@@ -102,9 +93,7 @@ class Database:
         :param key_index: int       # Index of table key in columns
         """
         # If a table with this name already exists, reset it instead of failing.
-        # This matches how the testers reuse "Grades" across runs.
         if name in self.tables:
-            # Drop the in-memory table object
             del self.tables[name]
 
             # Clear its on-disk directory so old pages don't linger
@@ -130,12 +119,9 @@ class Database:
             self.disk_manager = DiskManager(self.path)
             self.bufferpool = Bufferpool(self.disk_manager, BUFFERPOOL_CAPACITY)
 
-        # Create a fresh table using the (possibly reused) bufferpool
         table = Table(name, num_columns, key_index, bufferpool=self.bufferpool)
         self.tables[name] = table
         return table
-
-
 
     def drop_table(self, name):
         """
@@ -196,10 +182,10 @@ class Database:
             "page_directory": page_directory_info,
             "current_range_idx": current_range_idx,
             "current_tail_range_idx": current_tail_range_idx,
+            "updates_since_merge": table.updates_since_merge,
         }
 
         self.disk_manager.write_meta(table.name, metadata)
-
     
     def _load_table_metadata(self, table_name, metadata):
         """
@@ -215,6 +201,9 @@ class Database:
             table_name, num_col, key_idx, create_index=False, bufferpool=self.bufferpool
         )
         table.next_rid = next_rid
+        
+        # Restore update counter if it exists in metadata
+        table.updates_since_merge = metadata.get("updates_since_merge", 0)
 
         # rebuild page ranges
         for range_idx, pr_info in enumerate(metadata["page_ranges"]):

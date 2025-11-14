@@ -16,13 +16,11 @@ class DiskManager:
         kind = "tail" if is_tail else "base"
         d = self.table_dir(table)
 
-        # Make sure the directory exists, but be robust to weird Windows behavior
+        # Make sure the directory exists
         if not os.path.isdir(d):
             try:
                 os.makedirs(d, exist_ok=True)
             except FileExistsError:
-                # Something named "d" already exists but isn't a directory
-                # Re-raise with a clearer error so you know to delete it
                 if not os.path.isdir(d):
                     raise RuntimeError(
                         f"Path {d} exists and is not a directory. "
@@ -30,7 +28,6 @@ class DiskManager:
                     )
 
         return os.path.join(d, f"{kind}_{col}_{rng}_{idx}.bin")
-
 
     def read_page(self, table, is_tail, col, rng, idx):
         path = self.page_path(table, is_tail, col, rng, idx)  # reads from a disk

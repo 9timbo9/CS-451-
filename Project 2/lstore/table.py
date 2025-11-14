@@ -141,7 +141,6 @@ class PageRange:
         return record_data
 
 
-
 class Table:
 
     """
@@ -161,8 +160,11 @@ class Table:
         self.current_tail_page_range = None
         self.next_rid = 1
         self.DELETED_RID = 0  # if rid is 0 then it is deleted
-        self.bufferpool = bufferpool  # TODO: bufferpool integration
+        self.bufferpool = bufferpool
         self.index = Index(self, create_index)
+        
+        # Update-based merge tracking
+        self.updates_since_merge = 0
 
     def __str__(self):
         return f'Table(name="{self.name}", num_columns={self.num_columns}, key={self.key})'
@@ -261,10 +263,6 @@ class Table:
             return base_record[4:], base_record[SCHEMA_ENCODING_COLUMN]
 
         return tail_record[4:], tail_record[SCHEMA_ENCODING_COLUMN]
-
-
-
-    
         
     def update_record(self, rid, *columns):
         """
@@ -323,6 +321,12 @@ class Table:
         for col_num, old_value, new_value in updated_columns_info:
             if self.index.indices[col_num] is not None:
                 self.index.update(col_num, old_value, new_value, rid)
+
+        # Update-based merge: increment counter and check threshold
+        self.updates_since_merge += 1
+        if self.updates_since_merge >= MERGE_THRESHOLD_UPDATES:
+            self.merge()
+            self.updates_since_merge = 0
 
         return True
 

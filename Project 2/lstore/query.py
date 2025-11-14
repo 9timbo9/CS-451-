@@ -60,7 +60,7 @@ class Query:
         try:
             results = []
 
-            # 1) Try using an index if it exists on this column
+            # use index if it exists on the search column
             rids = set()
             if 0 <= search_key_index < self.table.num_columns:
                 col_index_struct = self.table.index.indices[search_key_index]
@@ -70,7 +70,7 @@ class Query:
             if col_index_struct is not None:
                 rids = self.table.index.locate(search_key_index, search_key)
 
-            # 2) Fallback: full scan of base records if index finds nothing
+            # if no index or cant find via index, do full table scan
             if not rids:
                 for rid, (range_idx, is_tail, offset) in self.table.page_directory.items():
                     if is_tail:
@@ -81,7 +81,7 @@ class Query:
                     if values[search_key_index] == search_key:
                         rids.add(rid)
 
-            # 3) Build Record objects for all matching RIDs
+            # retrieve records for all matching RIDs
             for rid in rids:
                 values, _schema = self.table.get_latest_version(rid)
                 if values is None:
@@ -97,7 +97,6 @@ class Query:
             return results
         except Exception:
             return False
-
 
     def select_version(self, search_key, search_key_index, projected_columns_index, relative_version):
         """
