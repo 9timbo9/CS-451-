@@ -5,6 +5,7 @@ from lstore.disk import DiskManager
 from lstore.bufferpool import Bufferpool
 from lstore.config import BUFFERPOOL_CAPACITY
 import os
+import shutil
 # import json
 
 
@@ -31,13 +32,10 @@ class Database:
             return  # No existing database to load
         # Delete existing files if specified
         if delete_existing:
-            # TODO: drag me out into the street and shoot me
-            import shutil
             if os.path.exists(path):
                 try:
                     shutil.rmtree(path)
                 except (PermissionError, OSError) as e:
-                    # On Windows, files might be locked - try to delete individual files
                     print(f"Warning: Could not delete directory, trying individual files: {e}")
                     for root, dirs, files in os.walk(path, topdown=False):
                         for name in files:
