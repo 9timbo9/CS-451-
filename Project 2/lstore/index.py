@@ -1,5 +1,4 @@
 from lstore.config import INDIRECTION_COLUMN
-from sortedcontainers import SortedDict
 
 
 class IndexNode:
@@ -54,7 +53,7 @@ class Index:
             if indirection_rid != 0:  # if indirection is non-zero, it's a tail record
                 tail_rids.add(indirection_rid)
         # Collect all values and their RIDs from the table, skipping tail records
-        temp_idx_map = SortedDict()
+        temp_idx_map = {}
         for rid, (pages, offset) in self.table.page_directory.items():
             if rid in tail_rids:
                 continue  # Skip tail records
@@ -70,7 +69,7 @@ class Index:
             temp_idx_map[value].add(rid)
         # Build doubly LL from map
         last_node = None
-        for key in temp_idx_map:
+        for key in sorted(temp_idx_map.keys()):
             # Create new node and populate RIDs
             node = IndexNode(key)
             node.rids.update(temp_idx_map[key])
