@@ -22,108 +22,124 @@ class PageRange:
     """
     Manages a range of base and tail pages
     """
-    def __init__(self, num_columns):
-        self.num_columns = num_columns  # includes metadata columns
-        self.base_pages = [[] for _ in range(num_columns)]
-        self.tail_pages = [[] for _ in range(num_columns)]
-        
-        # init
-        for i in range(num_columns):
-            self.base_pages[i].append(Page())
-            self.tail_pages[i].append(Page())
-        
+    def __init__(self, table, range_idx):
+        self.table = table
+        self.range_idx = range_idx
+        self.num_columns = table.total_columns  # includes metadata columns
+
+        # logical record counts in this range
         self.num_base_records = 0
         self.num_tail_records = 0
-        self.max_records = 512 * 16  # 512 records per page times 16 pages
-    
+
+        # page counts per column
+        # start with 1 page per column for base and tail
+        self.num_base_pages_per_col = [1] * self.num_columns
+        self.num_tail_pages_per_col = [1] * self.num_columns
+
+        # capacity: 16 pages * 512 records/page
+        self.max_records = 512 * 16
+
     def has_capacity(self):
         """
         Just checking if there is space
         """
         return self.num_base_records < self.max_records
     
+    def _page_id(self, is_tail, col_index, page_index):
+        """
+        Build the page_id tuple used by the bufferpool.
+        """
+        return (self.table.name, is_tail, col_index, self.range_idx, page_index)
+
     def write_base_record(self, record_data):
         """
-        Write a record to base pages (one value per column)
-        Returns the offset where the record was written
+        Append a base record (metadata+user columns).
+        Returns the offset where the record was written (0-based index within this range).
         """
         offset = self.num_base_records
-        
+        page_index = offset // 512
+
         for col_index, value in enumerate(record_data):
-            # get current page for this column
-            page_list = self.base_pages[col_index]
-            current_page = page_list[-1]
-            
-            if not current_page.has_capacity():
-                new_page = Page()
-                page_list.append(new_page)
-                current_page = new_page
-            
-            current_page.write(value)
-        
+            # ensure we have enough pages for this column
+            if page_index >= self.num_base_pages_per_col[col_index]:
+                self.num_base_pages_per_col[col_index] += 1
+
+            pid = self._page_id(False, col_index, page_index)
+            page = self.table.bufferpool.fix_page(pid, mode="w")
+            # appending: Page.write writes at page.num_records
+            page.write(value)
+            self.table.bufferpool.unfix_page(pid, dirty=True)
+
         self.num_base_records += 1
         return offset
     
-    def write_tail_record(self, record_data):
-        """
-        Write a record to tail pages (for updates)
-        Returns the offset where the record was written
-        """
-        offset = self.num_tail_records
-        
-        for col_index, value in enumerate(record_data):
-            page_list = self.tail_pages[col_index]
-            current_page = page_list[-1]
-            
-            if not current_page.has_capacity():
-                new_page = Page()
-                page_list.append(new_page)
-                current_page = new_page
-            
-            current_page.write(value)
-        
-        self.num_tail_records += 1
-        return offset
-    
     def read_base_record(self, offset):
-        """Read a base record at given offset"""
+        """
+        Read a base record at given logical offset and return full [meta+user] list.
+        """
         record_data = []
-        for col_index in range(self.num_columns):
-            # calculate which page and slot within that page
-            # print(offset)
-            # print(offset//512)
-            # print(offset%512)
-            page_index = offset // 512  # do ranges even need to have a cap
-            slot_in_page = offset % 512
-            
-            page = self.base_pages[col_index][page_index]
-            value = page.read(slot_in_page)
-            record_data.append(value)
-        
-        return record_data
-    
-    def read_tail_record(self, offset):
-        """Read a tail record at given offset"""
-        record_data = []
-        for col_index in range(self.num_columns):
-            page_index = offset // 512
-            slot_in_page = offset % 512
-            
-            page = self.tail_pages[col_index][page_index]
-            value = page.read(slot_in_page)
-            record_data.append(value)
-        
-        return record_data
-    
-    def update_base_column(self, offset, col_index, value):
-        """Update a specific column in a base record"""
         page_index = offset // 512
         slot_in_page = offset % 512
-        
-        page = self.base_pages[col_index][page_index]
-        # overwrite the value at the specific slot
-        page_offset = slot_in_page * 8
-        page.data[page_offset:page_offset+8] = value.to_bytes(8, byteorder='little', signed=(value < 0))
+
+        for col_index in range(self.num_columns):
+            pid = self._page_id(False, col_index, page_index)
+            page = self.table.bufferpool.fix_page(pid, mode="r")
+            value = page.read(slot_in_page)
+            self.table.bufferpool.unfix_page(pid)
+            record_data.append(value)
+
+        return record_data
+
+    def update_base_column(self, offset, col_index, value):
+        """
+        Overwrite a specific column in a base record at 'offset'.
+        col_index is the *physical* column index (includes metadata).
+        """
+        page_index = offset // 512
+        slot_in_page = offset % 512
+
+        pid = self._page_id(False, col_index, page_index)
+        page = self.table.bufferpool.fix_page(pid, mode="w")
+        page.update(slot_in_page, value)
+        self.table.bufferpool.unfix_page(pid, dirty=True)
+    
+    def write_tail_record(self, record_data):
+        """
+        Append a tail record (metadata+user columns).
+        Returns the offset where the tail record was written.
+        """
+        offset = self.num_tail_records
+        page_index = offset // 512
+
+        for col_index, value in enumerate(record_data):
+            if page_index >= self.num_tail_pages_per_col[col_index]:
+                self.num_tail_pages_per_col[col_index] += 1
+
+            pid = self._page_id(True, col_index, page_index)
+            page = self.table.bufferpool.fix_page(pid, mode="w")
+            page.write(value)
+            self.table.bufferpool.unfix_page(pid, dirty=True)
+
+        self.num_tail_records += 1
+        return offset
+
+    def read_tail_record(self, offset):
+        """
+        Read a tail record at given offset and return full [meta+user] list.
+        """
+        record_data = []
+        page_index = offset // 512
+        slot_in_page = offset % 512
+
+        for col_index in range(self.num_columns):
+            pid = self._page_id(True, col_index, page_index)
+            page = self.table.bufferpool.fix_page(pid, mode="r")
+            value = page.read(slot_in_page)
+            self.table.bufferpool.unfix_page(pid)
+            record_data.append(value)
+
+        return record_data
+
 
 
 class Table:
@@ -155,212 +171,222 @@ class Table:
         return self.__str__()
 
     def _get_or_create_page_range(self):
-        """Get current page range or create new one if full"""  # CHANGE !!!
+        """Get current page range or create a new one if the current is full."""
         if self.current_page_range is None or not self.current_page_range.has_capacity():
-            self.current_page_range = PageRange(self.total_columns)
-            self.page_ranges.append(self.current_page_range)
+            pr = PageRange(self, len(self.page_ranges))
+            self.page_ranges.append(pr)
+            self.current_page_range = pr
         return self.current_page_range
+
     
     def insert(self, *columns):
         """
-        Insert a new base record and returns the RID of the inserted record
+        Insert a new base record and return the RID of the inserted record.
         """
         if len(columns) != self.num_columns:
             raise ValueError(f"Expected {self.num_columns} columns, got {len(columns)}")
 
+        # enforce unique primary key
         if self.index.locate(self.key, columns[self.key]):
-            raise ValueError(f"Duplicate entry for primary key column {self.key} with value {columns[self.key]}")
-        
+            raise ValueError(
+                f"Duplicate entry for primary key column {self.key} with value {columns[self.key]}"
+            )
+
         rid = self.next_rid
         self.next_rid += 1
-        
-        indirection = 0  # no tail records
+
+        indirection = 0  # no tail yet
         timestamp = int(time())
         schema_encoding = 0
-        
-        # metadata and appended actual columns
+
         full_record = [indirection, rid, timestamp, schema_encoding] + list(columns)
-        
+
         page_range = self._get_or_create_page_range()
         offset = page_range.write_base_record(full_record)
-        
-        self.page_directory[rid] = (page_range.base_pages, offset)
 
+        # base record
+        self.page_directory[rid] = (page_range.range_idx, False, offset)
+
+        # update indices
         for col_num in range(self.num_columns):
             if self.index.indices[col_num] is not None:
                 value = columns[col_num]
                 self.index.insert(col_num, value, rid)
-        
+
         return rid
-    
+
     def read_record(self, rid):
         """
-        Read a record by a given RID
-        Returns the record data as a list or None if its deleted
+        Read a record (base or tail) by RID.
+        Returns full [meta+user] list, or None if deleted/not present.
         """
-        if rid not in self.page_directory:
+        loc = self.page_directory.get(rid)
+        if loc is None:
             return None
-        
-        pages, offset = self.page_directory[rid]
-        
-        record_data = []
-        for col_index in range(self.total_columns):
-            page_index = offset // 512
-            slot_in_page = offset % 512
-            
-            page = pages[col_index][page_index]
-            value = page.read(slot_in_page)
-            record_data.append(value)
-        
+
+        range_idx, is_tail, offset = loc
+        page_range = self.page_ranges[range_idx]
+
+        if not is_tail:
+            record_data = page_range.read_base_record(offset)
+        else:
+            record_data = page_range.read_tail_record(offset)
+
         if record_data[RID_COLUMN] == self.DELETED_RID:
             return None
-        
+
         return record_data
     
     def get_latest_version(self, rid):
         """
-        Get the latest version of a record by following the indirection chain
-        Returns tuple: (record_data, schema_encoding)
-        record_data contains only the actual columns (not metadata)
+        Get the latest version of a record by following the indirection chain.
+
+        Returns (user_columns_list, schema_encoding).
+        NOTE: This version ignores TPS for simplicity and correctness.
         """
-        base_record = self.read_record(rid)  # if it exists
+        base_record = self.read_record(rid)
         if base_record is None:
             return None, None
-        
-        # if there is only a base record (doesnt happen i think)
-        if base_record[INDIRECTION_COLUMN] == 0:
+
+        indirection_rid = base_record[INDIRECTION_COLUMN]
+
+        # If there's no tail chain, the base record is the latest
+        if indirection_rid == 0:
             return base_record[4:], base_record[SCHEMA_ENCODING_COLUMN]
-        
-        tail_rid = base_record[INDIRECTION_COLUMN]
-        tail_record = self.read_record(tail_rid)
-        
+
+        # Otherwise, follow the pointer to the latest tail record
+        tail_record = self.read_record(indirection_rid)
         if tail_record is None:
+            # Fallback: if something went wrong, return base
             return base_record[4:], base_record[SCHEMA_ENCODING_COLUMN]
-        
+
         return tail_record[4:], tail_record[SCHEMA_ENCODING_COLUMN]
+
+
+
     
-    def update_record(self, rid, *columns): 
-        # EXAMPLE TO USE UPDATE: update_record(1, None, 200, None)
-        # update RID 1, keep col 0, change col 1 to 200, keep col 2
+        
+    def update_record(self, rid, *columns):
         """
-        Update a record by creating a new tail record
-        columns: list where None means no change for that column
+        Update a record by creating a new tail record.
+        'columns' is a list where None means no change for that column.
         """
+        base_record = self.read_record(rid)
+        if base_record is None:
+            return False
+
+        latest_values, current_schema = self.get_latest_version(rid)
+
+        tail_rid = self.next_rid
+        self.next_rid += 1
+
+        prev_tail_rid = base_record[INDIRECTION_COLUMN]
+
+        new_schema = current_schema
+        updated_columns_info = []  # (col_index, old_val, new_val)
+
+        for i, value in enumerate(columns):
+            if value is not None:
+                new_schema |= (1 << i)
+                updated_columns_info.append((i, latest_values[i], value))
+
+        # build tail record [meta] + [user columns]
+        tail_data = [prev_tail_rid, tail_rid, int(time()), new_schema]
+        for i in range(self.num_columns):
+            if columns[i] is not None:
+                tail_data.append(columns[i])
+            else:
+                tail_data.append(latest_values[i])
+
+        # pick a page range for the tail
+        if (
+            self.current_tail_page_range is None
+            or self.current_tail_page_range.num_tail_records >= 512 * 16
+        ):
+            self.current_tail_page_range = self._get_or_create_page_range()
+
+        page_range = self.current_tail_page_range
+        offset = page_range.write_tail_record(tail_data)
+
+        # record the tail in page directory
+        self.page_directory[tail_rid] = (page_range.range_idx, True, offset)
+
+        # update base record's indirection + schema encoding in base pages
+        base_range_idx, is_tail, base_offset = self.page_directory[rid]
+        assert not is_tail
+        base_pr = self.page_ranges[base_range_idx]
+
+        base_pr.update_base_column(base_offset, INDIRECTION_COLUMN, tail_rid)
+        base_pr.update_base_column(base_offset, SCHEMA_ENCODING_COLUMN, new_schema)
+
+        # update all relevant secondary indexes
+        for col_num, old_value, new_value in updated_columns_info:
+            if self.index.indices[col_num] is not None:
+                self.index.update(col_num, old_value, new_value, rid)
+
+        return True
+
+    def delete_record(self, rid):
+        """
+        Mark a record as deleted by setting RID to DELETED_RID in the base record
+        and remove it from all indexes.
+        """
+        loc = self.page_directory.get(rid)
+        if loc is None:
+            return False
 
         base_record = self.read_record(rid)
         if base_record is None:
             return False
-        
-        latest_values, current_schema = self.get_latest_version(rid)
-        
-        tail_rid = self.next_rid
-        self.next_rid += 1
-        
-        # get the previous tail
-        prev_tail_rid = base_record[INDIRECTION_COLUMN]
-        
-        new_schema = current_schema
-        updated_columns_info = []  # track which columns changed for index updates
-        
-        for i, value in enumerate(columns):
-            if value is not None:
-                new_schema |= (1 << i)  # weird bit stuff to set bit i to 1
-                # print(new_schema)
-                updated_columns_info.append((i, latest_values[i], value))
-        
-        tail_data = [prev_tail_rid, tail_rid, int(time()), new_schema]  # tail metadata
-        
-        for i in range(self.num_columns):
-            # print(columns[i])
-            if columns[i] is not None: # if column is none then keep old version
-                tail_data.append(columns[i])
-            else:
-                tail_data.append(latest_values[i])
-        
-        if self.current_tail_page_range is None or self.current_tail_page_range.num_tail_records >= 512 * 16:
-            self.current_tail_page_range = self._get_or_create_page_range()
-        
-        page_range = self.current_tail_page_range
-        offset = page_range.write_tail_record(tail_data)
-        
-        self.page_directory[tail_rid] = (page_range.tail_pages, offset)
-        
-        base_pages, base_offset = self.page_directory[rid]
-        page_index = base_offset // 512
-        slot_in_page = base_offset % 512
-        
-        # update in base record
-        indirection_page = base_pages[INDIRECTION_COLUMN][page_index]
-        page_offset = slot_in_page * 8
-        indirection_page.data[page_offset:page_offset+8] = tail_rid.to_bytes(8, byteorder='little')
-        
-        schema_page = base_pages[SCHEMA_ENCODING_COLUMN][page_index]
-        schema_page.data[page_offset:page_offset+8] = new_schema.to_bytes(8, byteorder='little')
-        
-        for col_num, old_value, new_value in updated_columns_info:
-            if self.index.indices[col_num] is not None:
-                self.index.update(col_num, old_value, new_value, rid)
-        
-        return True
-    
-    def delete_record(self, rid):
-        """
-        Mark a record as deleted by setting RID to DELETED_RID (not actually removing the data yet)
-        Also update indexes to remove the deleted record (only the index)
-        """
-        if rid not in self.page_directory:
-            return False
-        base_record = self.read_record(rid)
-        if base_record is None:
-            return False
-        
+
         user_columns = base_record[4:]
-        pages, offset = self.page_directory[rid]
-        
-        page_index = offset // 512
-        slot_in_page = offset % 512
-        rid_page = pages[RID_COLUMN][page_index]
-        page_offset = slot_in_page * 8
-        rid_page.data[page_offset:page_offset+8] = self.DELETED_RID.to_bytes(8, byteorder='little')
-        
+
+        range_idx, is_tail, offset = loc
+        if is_tail:
+            # we only logically delete via base record in this implementation
+            return False
+
+        pr = self.page_ranges[range_idx]
+        pr.update_base_column(offset, RID_COLUMN, self.DELETED_RID)
+
+        # drop from indexes
         for col_num in range(self.num_columns):
             if self.index.indices[col_num] is not None:
                 value = user_columns[col_num]
                 self.index.delete(col_num, value, rid)
-        
+
         return True
     
     def get_version(self, rid, relative_version):
         """
-        Get a specific version of a record (version is a negative number like -2 for 2 versions ago)
-        Returns tuple: (record_data, schema_encoding)
-        record_data contains only the user columns (not metadata)
+        Get a specific version of a record.
+        relative_version is a negative number like -2 for "2 versions ago"
+        or 0 for "latest".
+        Returns (user_columns_list, schema_encoding).
         """
         base_record = self.read_record(rid)
         if base_record is None:
             return None, None
-        if relative_version == 0:  # 0 steps back
+
+        if relative_version == 0:
             return self.get_latest_version(rid)
-        
-        # tails rid should be in the indirection column of the base record
+
+        # start from latest tail record
         tail_rid = base_record[INDIRECTION_COLUMN]
-        
         if tail_rid == 0:
             return base_record[4:], base_record[SCHEMA_ENCODING_COLUMN]
-        
-        steps = abs(relative_version)  # number of steps backwards (versions)
+
+        steps = abs(relative_version)
         curr_tail_rid = tail_rid
-        
-        for i in range(steps):
-            if curr_tail_rid == 0:  # same as above
+
+        for _ in range(steps):
+            if curr_tail_rid == 0:
                 break
             tail_record = self.read_record(curr_tail_rid)
-            # print(tail_record)
             if tail_record is None:
                 return None, None
             curr_tail_rid = tail_record[INDIRECTION_COLUMN]
-        
-        # if that number of steps brings you back to the base record
+
         if curr_tail_rid == 0:
             return base_record[4:], base_record[SCHEMA_ENCODING_COLUMN]
         else:
@@ -370,16 +396,21 @@ class Table:
             return version_record[4:], version_record[SCHEMA_ENCODING_COLUMN]
 
     def __merge(self):
-        # nothing to do if there are no page ranges yet
+        """
+        Simple, in-place merge:
+        - For each base record in each PageRange:
+          * compute the latest values using get_latest_version()
+          * overwrite the user columns + schema encoding in the base pages
+          * update TPS on the base page to reflect the merged tail RID
+        """
         if not self.page_ranges:
             return
-
 
         for page_range in self.page_ranges:
             if page_range.num_base_records == 0:
                 continue
 
-            # for each base-record offset within this page range
+            # For each base-record offset within this page range
             for offset in range(page_range.num_base_records):
                 base_record = page_range.read_base_record(offset)
                 if not base_record:
@@ -387,28 +418,34 @@ class Table:
 
                 rid = base_record[RID_COLUMN]
 
+                # Skip deleted or empty slots
                 if rid == self.DELETED_RID or rid == 0:
                     continue
 
-                # ask table for latest visible version of this record, already follows the indirection chain into the tail pages
                 latest_values, schema_encoding = self.get_latest_version(rid)
                 if latest_values is None:
                     continue
 
-                # overwrite each user column in the base pages with the consolidated latest value
+                # Overwrite user columns in the base pages with the consolidated version
                 for user_col_idx, value in enumerate(latest_values):
-                    physical_col_idx = 4 + user_col_idx # skip metadata columns
+                    physical_col_idx = 4 + user_col_idx  # skip metadata columns
                     page_range.update_base_column(offset, physical_col_idx, value)
 
-                # update the schema-encoding metadata column in the base record
+                # Update the schema-encoding metadata column in the base record
                 page_range.update_base_column(offset, SCHEMA_ENCODING_COLUMN, schema_encoding)
 
-                # if this base record currently points to a tail record, mark that tail RID as having been applied to the base page that stores this record
+                # Update TPS on the base page: we have now merged up to at least the current tail RID
                 tail_rid = base_record[INDIRECTION_COLUMN]
                 if tail_rid != 0:
                     page_index = offset // 512
-                    for col_index in range(self.total_columns):
-                        base_page = page_range.base_pages[col_index][page_index]
-                        if getattr(base_page, "tps", None) is not None:
-                            if base_page.tps == 2**64 - 1 or tail_rid > base_page.tps:
-                                base_page.set_tps(tail_rid)
+                    # Use any base column (RID column here) to store TPS
+                    pid = page_range._page_id(False, RID_COLUMN, page_index)
+                    page = self.bufferpool.fix_page(pid, mode="w")
+                    current_tps = page.get_tps()
+                    # since RIDs are monotonically increasing, TPS = max of merged tail RIDs
+                    if tail_rid > current_tps:
+                        page.set_tps(tail_rid)
+                    self.bufferpool.unfix_page(pid, dirty=True)
+
+    def merge(self):
+        self.__merge()

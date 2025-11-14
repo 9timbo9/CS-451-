@@ -6,7 +6,7 @@ class Page:
         self.data = bytearray(4096)
         self.dirty = False
         self.pin_count = 0
-        self.tps = 2**64 - 1
+        self.tps = 0
 
     def has_capacity(self):
         # each record is 64 bits = 8 bytes (one column of one record = one value)

@@ -12,11 +12,25 @@ class DiskManager:
     def table_dir(self, table_name):
         return os.path.join(self.root, "tables", table_name)  # path to a table
 
-    def page_path(self, table, is_tail, col, rng, idx): 
-        kind = "tail" if is_tail else "base"  # finds path for a page
+    def page_path(self, table, is_tail, col, rng, idx):
+        kind = "tail" if is_tail else "base"
         d = self.table_dir(table)
-        os.makedirs(d, exist_ok=True)
+
+        # Make sure the directory exists, but be robust to weird Windows behavior
+        if not os.path.isdir(d):
+            try:
+                os.makedirs(d, exist_ok=True)
+            except FileExistsError:
+                # Something named "d" already exists but isn't a directory
+                # Re-raise with a clearer error so you know to delete it
+                if not os.path.isdir(d):
+                    raise RuntimeError(
+                        f"Path {d} exists and is not a directory. "
+                        f"Delete it (and its parent 'default_db') and rerun."
+                    )
+
         return os.path.join(d, f"{kind}_{col}_{rng}_{idx}.bin")
+
 
     def read_page(self, table, is_tail, col, rng, idx):
         path = self.page_path(table, is_tail, col, rng, idx)  # reads from a disk

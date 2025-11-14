@@ -35,52 +35,47 @@ class Index:
 
     def create_index(self, column_number):
         """
-        # optional: Create index on specific column
+        Create index on specific column.
+        We rebuild the index using ONLY base records (is_tail == False),
+        and we always index the *latest* version of each base record.
         """
+        # If index already exists, do nothing
         if self.indices[column_number] is not None:
-            return  # index already exists for this column
+            return
+
         idx_map = {}
         head = None
         tail = None
-        # First, collect all tail RIDs by scanning base records' indirection columns
-        tail_rids = set()
-        for rid, (pages, offset) in self.table.page_directory.items():
-            record = self.table.read_record(rid)
-            if record is None:
-                continue  # skip deleted records
-            # Check if this is a base record
-            indirection_rid = record[INDIRECTION_COLUMN]
-            if indirection_rid != 0:  # if indirection is non-zero, it's a tail record
-                tail_rids.add(indirection_rid)
-        # Collect all values and their RIDs from the table, skipping tail records
-        temp_idx_map = {}
-        for rid, (pages, offset) in self.table.page_directory.items():
-            if rid in tail_rids:
-                continue  # Skip tail records
-            record = self.table.read_record(rid)
-            if record is None:
-                continue  # skip deleted records
-            latest_values, _ = self.table.get_latest_version(rid)  # Get the latest record version
+
+        # Scan page_directory: rid -> (range_idx, is_tail, offset)
+        for rid, (range_idx, is_tail, offset) in self.table.page_directory.items():
+            # skip tail records; we index only logical records (base RIDs)
+            if is_tail:
+                continue
+
+            latest_values, _ = self.table.get_latest_version(rid)
             if latest_values is None:
-                continue  # skip if we can't get the latest version
+                continue  # deleted or inaccessible
+
             value = latest_values[column_number]
-            if value not in temp_idx_map:
-                temp_idx_map[value] = set()
-            temp_idx_map[value].add(rid)
-        # Build doubly LL from map
+            if value not in idx_map:
+                idx_map[value] = set()
+            idx_map[value].add(rid)
+
+        # Build doubly-linked list sorted by value
         last_node = None
-        for key in sorted(temp_idx_map.keys()):
-            # Create new node and populate RIDs
+        for key in sorted(idx_map.keys()):
             node = IndexNode(key)
-            node.rids.update(temp_idx_map[key])
+            node.rids.update(idx_map[key])
             idx_map[key] = node
-            # Link node into the list
+
             if last_node is None:
                 head = node
             else:
                 last_node.next = node
                 node.prev = last_node
             last_node = node
+
         tail = last_node
         self.indices[column_number] = (idx_map, head, tail)
 
@@ -97,13 +92,27 @@ class Index:
         returns the location of all records with the given value on column "column"
         """
         column_index = self.indices[column]
-        if column_index is None:
-            return set()  # if we haven't created an index for this column, return empty set
-        idx_map, head, tail = column_index
-        node = idx_map.get(value)
-        if node:
-            return node.rids
-        return set()
+        # If index exists, use it
+        if column_index is not None:
+            idx_map, head, tail = column_index
+            node = idx_map.get(value)
+            if node:
+                return node.rids
+            return set()
+
+        # Fallback: index not built for this column — scan page_directory
+        # This is slower but guarantees correctness when index wasn't created yet.
+        result = set()
+        for rid, (range_idx, is_tail, offset) in self.table.page_directory.items():
+            # only consider base logical records
+            if is_tail:
+                continue
+            latest_values, _ = self.table.get_latest_version(rid)
+            if latest_values is None:
+                continue
+            if latest_values[column] == value:
+                result.add(rid)
+        return result
 
     def locate_range(self, begin, end, column):
         """
@@ -111,8 +120,19 @@ class Index:
         """
         column_index = self.indices[column]
         result = set()
+        # If no index, fall back to scanning page_directory
         if column_index is None:
-            return result  # we haven't created an index for this column
+            for rid, (range_idx, is_tail, offset) in self.table.page_directory.items():
+                if is_tail:
+                    continue
+                latest_values, _ = self.table.get_latest_version(rid)
+                if latest_values is None:
+                    continue
+                val = latest_values[column]
+                if begin <= val <= end:
+                    result.add(rid)
+            return result
+
         idx_map, head, tail = column_index
         cur_node = head
         # TODO: optimize by binary search
