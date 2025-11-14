@@ -323,6 +323,7 @@ class Table:
                 self.index.update(col_num, old_value, new_value, rid)
 
         # Update-based merge: increment counter and check threshold
+        # TODO: The merge is triggered synchronously during updates, which blocks transactions. The assignment specifies it should be "contention-free" - meaning it should run in a background thread.
         self.updates_since_merge += 1
         if self.updates_since_merge >= MERGE_THRESHOLD_UPDATES:
             self.merge()
@@ -414,6 +415,23 @@ class Table:
             if page_range.num_base_records == 0:
                 continue
 
+            # TODO: merge function sets TPS after merging each record but never checks it beforehand, so every merge re-processes ALL base records even if they were already merged in a previous merge operation.
+            # check if tail_rid <= current_tps: continue at the start to skip records whose updates have already been consolidated into the base pages, making merge O(new updates) instead of O(all records).
+            #
+            # This seems to work but I'm not totally sure. It is way faster than before (merge after 100k updates used to take like 4.5s but now we can merge every every like 10k updates and it only takes 2.5s). 
+            # page_index = offset // 512
+            # pid = page_range._page_id(False, RID_COLUMN, page_index)
+            # page = self.bufferpool.fix_page(pid, mode="r")
+            # current_tps = page.get_tps()
+            # self.bufferpool.unfix_page(pid)
+            #
+            # base_record = page_range.read_base_record(offset)
+            # tail_rid = base_record[INDIRECTION_COLUMN]
+            #
+            # # Skip if this record's tail chain was already merged
+            # if tail_rid != 0 and tail_rid <= current_tps:
+            #    continue  # Already merged up to this tail!
+
             # For each base-record offset within this page range
             for offset in range(page_range.num_base_records):
                 base_record = page_range.read_base_record(offset)
@@ -450,6 +468,11 @@ class Table:
                     if tail_rid > current_tps:
                         page.set_tps(tail_rid)
                     self.bufferpool.unfix_page(pid, dirty=True)
+
+        # TODO: After merge, tail pages are not freed/reset, causing unbounded disk/memory growth.
+        # Should either: (1) delete tail page files and reset num_tail_records=0, or
+        # (2) mark tail records as obsolete and reuse space for new updates.
+        # Current behavior: tail pages remain on disk forever, wasting space.
 
     def merge(self):
         self.__merge()
