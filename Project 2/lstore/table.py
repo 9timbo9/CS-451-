@@ -370,5 +370,45 @@ class Table:
             return version_record[4:], version_record[SCHEMA_ENCODING_COLUMN]
 
     def __merge(self):
-        print("merge is happening")  # ASSIGNMENT 2!!!
-        pass
+        # nothing to do if there are no page ranges yet
+        if not self.page_ranges:
+            return
+
+
+        for page_range in self.page_ranges:
+            if page_range.num_base_records == 0:
+                continue
+
+            # for each base-record offset within this page range
+            for offset in range(page_range.num_base_records):
+                base_record = page_range.read_base_record(offset)
+                if not base_record:
+                    continue
+
+                rid = base_record[RID_COLUMN]
+
+                if rid == self.DELETED_RID or rid == 0:
+                    continue
+
+                # ask table for latest visible version of this record, already follows the indirection chain into the tail pages
+                latest_values, schema_encoding = self.get_latest_version(rid)
+                if latest_values is None:
+                    continue
+
+                # overwrite each user column in the base pages with the consolidated latest value
+                for user_col_idx, value in enumerate(latest_values):
+                    physical_col_idx = 4 + user_col_idx # skip metadata columns
+                    page_range.update_base_column(offset, physical_col_idx, value)
+
+                # update the schema-encoding metadata column in the base record
+                page_range.update_base_column(offset, SCHEMA_ENCODING_COLUMN, schema_encoding)
+
+                # if this base record currently points to a tail record, mark that tail RID as having been applied to the base page that stores this record
+                tail_rid = base_record[INDIRECTION_COLUMN]
+                if tail_rid != 0:
+                    page_index = offset // 512
+                    for col_index in range(self.total_columns):
+                        base_page = page_range.base_pages[col_index][page_index]
+                        if getattr(base_page, "tps", None) is not None:
+                            if base_page.tps == 2**64 - 1 or tail_rid > base_page.tps:
+                                base_page.set_tps(tail_rid)
