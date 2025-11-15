@@ -2,6 +2,8 @@ from lstore.index import Index
 from lstore.page import Page
 from lstore.config import *
 from time import time
+import os
+import threading
 
 
 class Record:
@@ -36,8 +38,8 @@ class PageRange:
         self.num_base_pages_per_col = [1] * self.num_columns
         self.num_tail_pages_per_col = [1] * self.num_columns
 
-        # capacity: 16 pages * 512 records/page
-        self.max_records = 512 * 16
+        # capacity: 16 pages * RECORDS_PER_PAGE records/page
+        self.max_records = RECORDS_PER_PAGE * 16
 
     def has_capacity(self):
         """
@@ -57,7 +59,7 @@ class PageRange:
         Returns the offset where the record was written (0-based index within this range).
         """
         offset = self.num_base_records
-        page_index = offset // 512
+        page_index = offset // RECORDS_PER_PAGE
 
         for col_index, value in enumerate(record_data):
             # ensure we have enough pages for this column
@@ -78,8 +80,8 @@ class PageRange:
         Read a base record at given logical offset and return full [meta+user] list.
         """
         record_data = []
-        page_index = offset // 512
-        slot_in_page = offset % 512
+        page_index = offset // RECORDS_PER_PAGE
+        slot_in_page = offset % RECORDS_PER_PAGE
 
         for col_index in range(self.num_columns):
             pid = self._page_id(False, col_index, page_index)
@@ -95,8 +97,8 @@ class PageRange:
         Overwrite a specific column in a base record at 'offset'.
         col_index is the *physical* column index (includes metadata).
         """
-        page_index = offset // 512
-        slot_in_page = offset % 512
+        page_index = offset // RECORDS_PER_PAGE
+        slot_in_page = offset % RECORDS_PER_PAGE
 
         pid = self._page_id(False, col_index, page_index)
         page = self.table.bufferpool.fix_page(pid, mode="w")
@@ -109,7 +111,7 @@ class PageRange:
         Returns the offset where the tail record was written.
         """
         offset = self.num_tail_records
-        page_index = offset // 512
+        page_index = offset // RECORDS_PER_PAGE
 
         for col_index, value in enumerate(record_data):
             if page_index >= self.num_tail_pages_per_col[col_index]:
@@ -128,8 +130,8 @@ class PageRange:
         Read a tail record at given offset and return full [meta+user] list.
         """
         record_data = []
-        page_index = offset // 512
-        slot_in_page = offset % 512
+        page_index = offset // RECORDS_PER_PAGE
+        slot_in_page = offset % RECORDS_PER_PAGE
 
         for col_index in range(self.num_columns):
             pid = self._page_id(True, col_index, page_index)
@@ -165,6 +167,13 @@ class Table:
         
         # Update-based merge tracking
         self.updates_since_merge = 0
+        
+        # Background merge thread
+        self._merge_lock = threading.Lock()  # Lock for thread-safe merge operations
+        self._merge_thread = None
+        self._merge_thread_stop = threading.Event()  # signals thread to stop
+        self._merge_in_progress = False  # prevent concurrent merges
+        self._start_merge_thread()
 
     def __str__(self):
         return f'Table(name="{self.name}", num_columns={self.num_columns}, key={self.key})'
@@ -299,7 +308,7 @@ class Table:
         # pick a page range for the tail
         if (
             self.current_tail_page_range is None
-            or self.current_tail_page_range.num_tail_records >= 512 * 16
+            or self.current_tail_page_range.num_tail_records >= RECORDS_PER_PAGE * 16
         ):
             self.current_tail_page_range = self._get_or_create_page_range()
 
@@ -322,12 +331,9 @@ class Table:
             if self.index.indices[col_num] is not None:
                 self.index.update(col_num, old_value, new_value, rid)
 
-        # Update-based merge: increment counter and check threshold
-        # TODO: The merge is triggered synchronously during updates, which blocks transactions. The assignment specifies it should be "contention-free" - meaning it should run in a background thread.
-        self.updates_since_merge += 1
-        if self.updates_since_merge >= MERGE_THRESHOLD_UPDATES:
-            self.merge()
-            self.updates_since_merge = 0
+        # increment update counter for merge tracking
+        with self._merge_lock:
+            self.updates_since_merge += 1
 
         return True
 
@@ -344,20 +350,23 @@ class Table:
         if base_record is None:
             return False
 
-        user_columns = base_record[4:]
-
         range_idx, is_tail, offset = loc
         if is_tail:
             # we only logically delete via base record in this implementation
             return False
 
+        # get latest version to ensure we have the correct values for index deletion
+        latest_values, _ = self.get_latest_version(rid)
+        if latest_values is None:
+            return False
+
         pr = self.page_ranges[range_idx]
         pr.update_base_column(offset, RID_COLUMN, self.DELETED_RID)
 
-        # drop from indexes
+        # drop from indexes using latest values
         for col_num in range(self.num_columns):
             if self.index.indices[col_num] is not None:
-                value = user_columns[col_num]
+                value = latest_values[col_num]
                 self.index.delete(col_num, value, rid)
 
         return True
@@ -415,34 +424,33 @@ class Table:
             if page_range.num_base_records == 0:
                 continue
 
-            # TODO: merge function sets TPS after merging each record but never checks it beforehand, so every merge re-processes ALL base records even if they were already merged in a previous merge operation.
-            # check if tail_rid <= current_tps: continue at the start to skip records whose updates have already been consolidated into the base pages, making merge O(new updates) instead of O(all records).
-            #
-            # This seems to work but I'm not totally sure. It is way faster than before (merge after 100k updates used to take like 4.5s but now we can merge every every like 10k updates and it only takes 2.5s). 
-            # page_index = offset // 512
-            # pid = page_range._page_id(False, RID_COLUMN, page_index)
-            # page = self.bufferpool.fix_page(pid, mode="r")
-            # current_tps = page.get_tps()
-            # self.bufferpool.unfix_page(pid)
-            #
-            # base_record = page_range.read_base_record(offset)
-            # tail_rid = base_record[INDIRECTION_COLUMN]
-            #
-            # # Skip if this record's tail chain was already merged
-            # if tail_rid != 0 and tail_rid <= current_tps:
-            #    continue  # Already merged up to this tail!
-
+            last_page_idx = -1
+            current_tps = 0
             # For each base-record offset within this page range
             for offset in range(page_range.num_base_records):
+                page_index = offset // RECORDS_PER_PAGE
+                # only read tps when on a new page
+                if page_index != last_page_idx:
+                    pid = page_range._page_id(False, RID_COLUMN, page_index)
+                    page = self.bufferpool.fix_page(pid, mode="r")
+                    current_tps = page.get_tps()
+                    self.bufferpool.unfix_page(pid)
+                    last_page_idx = page_index
+
                 base_record = page_range.read_base_record(offset)
                 if not base_record:
                     continue
 
                 rid = base_record[RID_COLUMN]
+                tail_rid = base_record[INDIRECTION_COLUMN]
 
                 # Skip deleted or empty slots
                 if rid == self.DELETED_RID or rid == 0:
                     continue
+
+                # Skip if this record's tail chain was already merged
+                if tail_rid != 0 and tail_rid <= current_tps:
+                    continue  # Already merged up to this tail
 
                 latest_values, schema_encoding = self.get_latest_version(rid)
                 if latest_values is None:
@@ -459,7 +467,7 @@ class Table:
                 # Update TPS on the base page: we have now merged up to at least the current tail RID
                 tail_rid = base_record[INDIRECTION_COLUMN]
                 if tail_rid != 0:
-                    page_index = offset // 512
+                    page_index = offset // RECORDS_PER_PAGE
                     # Use any base column (RID column here) to store TPS
                     pid = page_range._page_id(False, RID_COLUMN, page_index)
                     page = self.bufferpool.fix_page(pid, mode="w")
@@ -469,10 +477,79 @@ class Table:
                         page.set_tps(tail_rid)
                     self.bufferpool.unfix_page(pid, dirty=True)
 
-        # TODO: After merge, tail pages are not freed/reset, causing unbounded disk/memory growth.
-        # Should either: (1) delete tail page files and reset num_tail_records=0, or
-        # (2) mark tail records as obsolete and reuse space for new updates.
-        # Current behavior: tail pages remain on disk forever, wasting space.
+        # Free tail pages after merge to reclaim disk/memory
+        for page_range in self.page_ranges:
+            if page_range.num_tail_records == 0:
+                continue  # No tail pages to clean
+            
+            # Remove tail pages from bufferpool
+            for col_idx in range(page_range.num_columns):
+                num_tail_pages = page_range.num_tail_pages_per_col[col_idx]
+                for page_idx in range(num_tail_pages):
+                    pid = page_range._page_id(True, col_idx, page_idx)
+                    
+                    # Evict from bufferpool if present
+                    if pid in self.bufferpool.frames:
+                        # Flush if dirty before removing
+                        self.bufferpool.flush(pid)
+                        del self.bufferpool.frames[pid]
+                        if pid in self.bufferpool.lru:
+                            del self.bufferpool.lru[pid]
+                    
+                    # Delete file from disk
+                    path = self.bufferpool.disk.page_path(self.name, True, col_idx, page_range.range_idx, page_idx)
+                    if os.path.exists(path):
+                        try:
+                            os.remove(path)
+                        except OSError:
+                            pass  # Ignore errors if file is locked/missing
+            
+            # Reset tail record tracking for this page range
+            page_range.num_tail_records = 0
+            page_range.num_tail_pages_per_col = [1] * page_range.num_columns
 
     def merge(self):
-        self.__merge()
+        """Public method to trigger merge"""
+        # Prevent concurrent merges
+        with self._merge_lock:
+            if self._merge_in_progress:
+                return  # Merge already in progress, skip
+            self._merge_in_progress = True
+        
+        try:
+            self.__merge()
+            # Reset counter after successful merge
+            with self._merge_lock:
+                self.updates_since_merge = 0
+        finally:
+            with self._merge_lock:
+                self._merge_in_progress = False
+    
+    def _start_merge_thread(self):
+        """Start the background merge thread"""
+        if self._merge_thread is None or not self._merge_thread.is_alive():
+            self._merge_thread_stop.clear()
+            self._merge_thread = threading.Thread(target=self._merge_thread_worker, daemon=True)
+            self._merge_thread.start()
+    
+    def _merge_thread_worker(self):
+        """Background thread worker that periodically checks if merge is needed"""
+        while not self._merge_thread_stop.is_set():
+            # Check if merge is needed
+            should_merge = False
+            with self._merge_lock:
+                if self.updates_since_merge >= MERGE_THRESHOLD_UPDATES and not self._merge_in_progress:
+                    should_merge = True
+            
+            if should_merge:
+                self.merge()
+            
+            # Sleep for the check interval, but wake up early if stop is signaled
+            self._merge_thread_stop.wait(timeout=MERGE_CHECK_INTERVAL)
+    
+    def stop_merge_thread(self):
+        """Stop the background merge thread when table/db is closing"""
+        if self._merge_thread is not None:
+            self._merge_thread_stop.set()
+            self._merge_thread.join(timeout=5.0)  # Wait up to 5 seconds for thread to finish
+            self._merge_thread = None
