@@ -543,19 +543,10 @@ class Table:
                         # Evict from bufferpool if present
                         try:
                             if pid in self.bufferpool.frames:
-                                try:
-                                    self.bufferpool.flush(pid)
-                                except Exception:
-                                    pass
-                                try:
-                                    del self.bufferpool.frames[pid]
-                                except KeyError:
-                                    pass
+                                self.bufferpool.flush(pid)
+                                del self.bufferpool.frames[pid]
                                 if pid in self.bufferpool.lru:
-                                    try:
-                                        del self.bufferpool.lru[pid]
-                                    except KeyError:
-                                        pass
+                                    del self.bufferpool.lru[pid]
                         except Exception:
                             pass
                         
