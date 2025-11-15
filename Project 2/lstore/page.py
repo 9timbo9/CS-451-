@@ -1,10 +1,10 @@
-from lstore.config import RECORDS_PER_PAGE
+from lstore.config import RECORDS_PER_PAGE, PAGE_SIZE
 
 class Page:
 
     def __init__(self):
         self.num_records = 0
-        self.data = bytearray(4096)
+        self.data = bytearray(PAGE_SIZE)
         self.dirty = False
         self.pin_count = 0
         # TPS is stored in the first 8 bytes of data, load it when page is created
@@ -18,6 +18,8 @@ class Page:
     def has_capacity(self):
         # Page structure: 8 bytes for TPS + (511 records * 8 bytes each) = 4096 bytes
         # print("checking capacity")
+        if RECORDS_PER_PAGE*8 + 8 > PAGE_SIZE:
+            raise RuntimeError("RECORDS_PER_PAGE is too large for the set page size.")
         return self.num_records < RECORDS_PER_PAGE
 
     def write(self, value):
