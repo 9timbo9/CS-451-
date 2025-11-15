@@ -7,5 +7,5 @@ PAGE_SIZE = 4096  # Fixed page size
 RECORDS_PER_PAGE = 511  # 8 bytes for TPS + (511 * 8 bytes) = 4096 bytes total
 BUFFERPOOL_CAPACITY = 8192
 
-MERGE_THRESHOLD_UPDATES = 50_000  # Trigger merge after this many updates
-MERGE_CHECK_INTERVAL = 0.25  # How often (in seconds) the background merge thread checks if merge is needed
+MERGE_THRESHOLD_UPDATES = 1000  # trigger merge after this many updates
+MERGE_CHECK_INTERVAL = 0.25
