@@ -18,6 +18,8 @@ class Page:
     def has_capacity(self):
         # Page structure: 8 bytes for TPS + (511 records * 8 bytes each) = 4096 bytes
         # print("checking capacity")
+        if RECORDS_PER_PAGE*8 + 8 > 4096:
+            raise RuntimeError("RECORDS_PER_PAGE is too large for the set page size.")
         return self.num_records < RECORDS_PER_PAGE
 
     def write(self, value):
