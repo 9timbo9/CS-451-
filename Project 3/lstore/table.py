@@ -73,6 +73,8 @@ class PageRange:
 
                 pid = self._page_id(False, col_index, page_index)
                 page = self.table.bufferpool.fix_page(pid, mode="w")
+                if page.num_records == 0:
+                    page.num_records = offset % RECORDS_PER_PAGE
                 # appending: Page.write writes at page.num_records
                 page.write(value)
                 self.table.bufferpool.unfix_page(pid, dirty=True)
@@ -109,6 +111,13 @@ class PageRange:
 
             pid = self._page_id(False, col_index, page_index)
             page = self.table.bufferpool.fix_page(pid, mode="w")
+            if page.num_records == 0:
+                last_page_idx = (self.num_base_records - 1) // RECORDS_PER_PAGE
+                if page_index < last_page_idx:
+                    page.num_records = RECORDS_PER_PAGE
+                else:
+                    count = self.num_base_records % RECORDS_PER_PAGE
+                    page.num_records = RECORDS_PER_PAGE if count == 0 else count
             page.update(slot_in_page, value)
             self.table.bufferpool.unfix_page(pid, dirty=True)
     
@@ -128,6 +137,10 @@ class PageRange:
 
                 pid = self._page_id(True, col_index, page_index)
                 page = self.table.bufferpool.fix_page(pid, mode="w")
+
+                if page.num_records == 0:
+                    page.num_records = offset % RECORDS_PER_PAGE
+
                 page.write(value)
                 self.table.bufferpool.unfix_page(pid, dirty=True)
 
@@ -174,7 +187,10 @@ class Table:
         self.DELETED_RID = 0  # if rid is 0 then it is deleted
         self.bufferpool = bufferpool
         self.index = Index(self, create_index)
-        
+
+        self._rids_to_merge = set()
+        self._rids_to_merge_lock = threading.Lock()
+
         # each shared data structure has a lock
         self.page_directory_lock = threading.RLock()
         self.page_ranges_lock = threading.RLock()
@@ -365,6 +381,9 @@ class Table:
             if self.index.indices[col_num] is not None:
                 self.index.update(col_num, old_value, new_value, rid)
 
+        with self._rids_to_merge_lock:
+            self._rids_to_merge.add(rid)
+
         # increment update counter for merge tracking
         with self.updates_counter_lock:
             self.updates_since_merge += 1
@@ -456,51 +475,87 @@ class Table:
           * overwrite the user columns + schema encoding in the base pages
           * update TPS on the base page to reflect the merged tail RID
         """
+        with self._rids_to_merge_lock:
+            rids_to_merge = self._rids_to_merge.copy()
+            self._rids_to_merge.clear()
 
-        with self.page_ranges_lock:
-            page_ranges_snapshot = list(self.page_ranges) # temporary snapshot of the page ranges for use in merge
-        # print("MERGE")
-        
-        if not page_ranges_snapshot:
+        if not rids_to_merge:
             return
 
-        for page_range in page_ranges_snapshot:
+        with self.page_ranges_lock:
+            # Capture current tail range at start to avoid cleaning it
+            start_tail_range = self.current_tail_page_range
+        # print("MERGE")
+
+        merged_ranges = set()
+
+        # Group RIDs by their page range
+        rids_by_range = {}
+        with self.page_directory_lock:
+            for rid in rids_to_merge:
+                loc = self.page_directory.get(rid)
+                if loc is None:
+                    continue
+                range_idx, is_tail, offset = loc
+                if is_tail:
+                    continue  # skip tail records
+                if range_idx not in rids_by_range:
+                    rids_by_range[range_idx] = []
+                rids_by_range[range_idx].append((rid, offset))
+
+        with self.page_ranges_lock:
+            page_ranges_list = list(self.page_ranges)
+
+        for range_idx, rid_offset_list in rids_by_range.items():
+            if range_idx >= len(page_ranges_list):
+                continue
+            page_range = page_ranges_list[range_idx]
+
             acquired = page_range.lock.acquire(blocking=False)
             if not acquired:
-                # print("ALREADY IN USE")
+                # Put RIDs back for next merge cycle
+                with self._rids_to_merge_lock:
+                    for rid, _ in rid_offset_list:
+                        self._rids_to_merge.add(rid)
                 continue
 
+            merged_ranges.add(page_range)
+
             try:
-                num_base = page_range.num_base_records
-                if num_base == 0:
-                    continue
-
-                last_page_idx = -1
-                current_tps = 0
-                for offset in range(num_base):
+                for rid, offset in rid_offset_list:
                     page_index = offset // RECORDS_PER_PAGE
-                    # only read tps when on a new page
-                    if page_index != last_page_idx:
-                        pid = page_range._page_id(False, RID_COLUMN, page_index)
-                        page = self.bufferpool.fix_page(pid, mode="r")
-                        current_tps = page.get_tps()
-                        self.bufferpool.unfix_page(pid)
-                        last_page_idx = page_index
 
+                    # Read base record directly (we already hold the lock)
                     base_record = page_range.read_base_record(offset)
                     if not base_record:
                         continue
 
-                    rid = base_record[RID_COLUMN]
+                    base_rid = base_record[RID_COLUMN]
                     tail_rid = base_record[INDIRECTION_COLUMN]
 
-                    if rid == self.DELETED_RID or rid == 0:
+                    if base_rid == self.DELETED_RID or base_rid == 0:
                         continue
 
-                    if tail_rid != 0 and tail_rid <= current_tps:
-                        continue  # already merged up to this tail
+                    if tail_rid == 0:
+                        continue  # no tail to merge
+
+                    # Check TPS
+                    pid = page_range._page_id(False, RID_COLUMN, page_index)
+                    page = self.bufferpool.fix_page(pid, mode="r")
+                    current_tps = page.get_tps()
+                    self.bufferpool.unfix_page(pid)
+
+                    if tail_rid <= current_tps:
+                        continue  # already merged
+
+                    # Need to release lock before calling get_latest_version to avoid potential deadlock w/ other page ranges
+                    page_range.lock.release()
 
                     latest_values, schema_encoding = self.get_latest_version(rid)
+
+                    # Reacquire lock
+                    page_range.lock.acquire()
+
                     if latest_values is None:
                         continue
 
@@ -510,24 +565,25 @@ class Table:
 
                     page_range.update_base_column(offset, SCHEMA_ENCODING_COLUMN, schema_encoding)
 
-                    tail_rid = base_record[INDIRECTION_COLUMN]
-                    if tail_rid != 0:
-                        page_index = offset // RECORDS_PER_PAGE
-                        pid = page_range._page_id(False, RID_COLUMN, page_index)
-                        page = self.bufferpool.fix_page(pid, mode="w")
-                        current_tps = page.get_tps()
-                        # since RIDs are monotonically increasing, TPS = max of merged tail RIDs
-                        if tail_rid > current_tps:
-                            page.set_tps(tail_rid)
-                        self.bufferpool.unfix_page(pid, dirty=True)
+                    # Update TPS
+                    pid = page_range._page_id(False, RID_COLUMN, page_index)
+                    page = self.bufferpool.fix_page(pid, mode="w")
+                    current_tps = page.get_tps()
+                    if tail_rid > current_tps:
+                        page.set_tps(tail_rid)
+                    self.bufferpool.unfix_page(pid, dirty=True)
             finally:
                 page_range.lock.release()
 
-        for page_range in page_ranges_snapshot:
+        for page_range in merged_ranges:
             acquired = page_range.lock.acquire(blocking=False)
             if not acquired:
                 continue
             try:
+                # Skip if its the active tail range (at start or now)
+                if page_range is self.current_tail_page_range or page_range is start_tail_range:
+                    continue
+
                 num_tail = page_range.num_tail_records
                 
                 if num_tail == 0:
