@@ -145,7 +145,8 @@ class Query:
 
             # cannot update primary key via update
             if columns[self.table.key] is not None and columns[self.table.key] != primary_key:
-                return False
+                if self.table.index.locate(self.table.key, columns[self.table.key]):
+                    return False
 
             # locate RIDs for a given primary key via its index
             rids = self.table.index.locate(self.table.key, primary_key)
