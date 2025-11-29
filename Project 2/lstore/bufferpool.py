@@ -73,6 +73,12 @@ class Bufferpool:
             self.flush(pid)
 
     def evict(self):
+        """
+        Evict a page from the bufferpool using LRU policy.
+        First tries to evict an unpinned page. If all pages are pinned,
+        force evicts the LRU page as a last resort to prevent deadlock.
+        """
+        # try to find an unpinned page
         for victim_id in list(self.lru.keys()):
             frame = self.frames[victim_id]
             if frame["pin"] == 0:
@@ -84,3 +90,17 @@ class Bufferpool:
                 del self.frames[victim_id]
                 del self.lru[victim_id]
                 return
+        
+        # all pages are pinned, force evict LRU page as last resort
+        # prevents deadlock when bufferpool is full and all pages are in use
+        if self.lru:
+            victim_id = next(iter(self.lru))  # Get the least recently used page
+            frame = self.frames[victim_id]
+            # flush if dirty before force evicting
+            if frame["dirty"]:
+                table, is_tail, col, rng, idx = victim_id
+                self.disk.write_page(table, is_tail, col, rng, idx, frame["page"].data)
+            # remove from structures (force evict even though pinned)
+            del self.frames[victim_id]
+            del self.lru[victim_id]
+            return

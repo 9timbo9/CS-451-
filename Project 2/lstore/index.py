@@ -36,8 +36,7 @@ class Index:
     def create_index(self, column_number):
         """
         Create index on specific column.
-        We rebuild the index using ONLY base records (is_tail == False),
-        and we always index the *latest* version of each base record.
+        Rebuild the index using only latest version of base records
         """
         # If index already exists, do nothing
         if self.indices[column_number] is not None:
@@ -49,8 +48,7 @@ class Index:
 
         # Scan page_directory: rid -> (range_idx, is_tail, offset)
         for rid, (range_idx, is_tail, offset) in self.table.page_directory.items():
-            # skip tail records; we index only logical records (base RIDs)
-            if is_tail:
+            if is_tail:  # skip tail records
                 continue
 
             latest_values, _ = self.table.get_latest_version(rid)
@@ -100,8 +98,7 @@ class Index:
                 return node.rids
             return set()
 
-        # Fallback: index not built for this column — scan page_directory
-        # This is slower but guarantees correctness when index wasn't created yet.
+        # scan page_directory if no index
         result = set()
         for rid, (range_idx, is_tail, offset) in self.table.page_directory.items():
             # only consider base logical records

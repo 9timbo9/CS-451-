@@ -3,10 +3,9 @@ from lstore.page import Page
 from lstore.index import Index
 from lstore.disk import DiskManager
 from lstore.bufferpool import Bufferpool
-from lstore.config import BUFFERPOOL_CAPACITY
+from lstore.config import BUFFERPOOL_CAPACITY, RECORDS_PER_PAGE
 import os
 import shutil
-# import json
 
 
 class Database:
@@ -75,6 +74,10 @@ class Database:
         if not self.path:
             return
 
+        # Stop all merge threads before closing
+        for _, table in self.tables.items():
+            table.stop_merge_thread()
+
         # write dirty pages to disk
         if self.bufferpool is not None:
             self.bufferpool.flush_all()
@@ -84,14 +87,6 @@ class Database:
             self._save_table_metadata(table)
 
         print(f'Database closed and saved to disk at "{self.path}"')
-    
-    def _save_all_pages(self, table):
-        """
-        Save all pages from table to individual page files via DiskManager
-        This ensures all pages are persisted even if not in bufferpool
-        """
-        pass
-
 
     def create_table(self, name, num_columns, key_index):
         """
@@ -102,9 +97,10 @@ class Database:
         :param key_index: int       # Index of table key in columns
         """
         # If a table with this name already exists, reset it instead of failing.
-        # This matches how the testers reuse "Grades" across runs.
         if name in self.tables:
-            # Drop the in-memory table object
+            old_table = self.tables[name]
+            # Stop merge thread before removing old table
+            old_table.stop_merge_thread()
             del self.tables[name]
 
             # Clear its on-disk directory so old pages don't linger
@@ -130,12 +126,9 @@ class Database:
             self.disk_manager = DiskManager(self.path)
             self.bufferpool = Bufferpool(self.disk_manager, BUFFERPOOL_CAPACITY)
 
-        # Create a fresh table using the (possibly reused) bufferpool
         table = Table(name, num_columns, key_index, bufferpool=self.bufferpool)
         self.tables[name] = table
         return table
-
-
 
     def drop_table(self, name):
         """
@@ -143,6 +136,9 @@ class Database:
         """
         if name not in self.tables:
             raise Exception(f"\"{name}\" table doesnt exist in db")
+        table = self.tables[name]
+        # Stop merge thread before dropping table
+        table.stop_merge_thread()
         del self.tables[name]
 
     def get_table(self, name):
@@ -188,6 +184,12 @@ class Database:
         if table.current_tail_page_range is not None:
             current_tail_range_idx = table.current_tail_page_range.range_idx
 
+        # Save which columns have indexes
+        indexed_columns = []
+        for col_num in range(table.num_columns):
+            if table.index.indices[col_num] is not None:
+                indexed_columns.append(col_num)
+
         metadata = {
             "num_columns": table.num_columns,
             "key_index": table.key,
@@ -196,10 +198,11 @@ class Database:
             "page_directory": page_directory_info,
             "current_range_idx": current_range_idx,
             "current_tail_range_idx": current_tail_range_idx,
+            "updates_since_merge": table.updates_since_merge,
+            "indexed_columns": indexed_columns,
         }
 
         self.disk_manager.write_meta(table.name, metadata)
-
     
     def _load_table_metadata(self, table_name, metadata):
         """
@@ -215,6 +218,9 @@ class Database:
             table_name, num_col, key_idx, create_index=False, bufferpool=self.bufferpool
         )
         table.next_rid = next_rid
+        
+        # Restore update counter if it exists in metadata
+        table.updates_since_merge = metadata.get("updates_since_merge", 0)
 
         # rebuild page ranges
         for range_idx, pr_info in enumerate(metadata["page_ranges"]):
@@ -233,10 +239,10 @@ class Database:
                     pid = (table_name, False, col_idx, range_idx, page_idx)
                     page = self.bufferpool.fix_page(pid, mode="r")
 
-                    records_before = page_idx * 512
+                    records_before = page_idx * RECORDS_PER_PAGE
                     remaining = pr.num_base_records - records_before
-                    if remaining > 512:
-                        page.num_records = 512
+                    if remaining > RECORDS_PER_PAGE:
+                        page.num_records = RECORDS_PER_PAGE
                     elif remaining > 0:
                         page.num_records = remaining
                     else:
@@ -250,10 +256,10 @@ class Database:
                     pid = (table_name, True, col_idx, range_idx, page_idx)
                     page = self.bufferpool.fix_page(pid, mode="r")
 
-                    records_before = page_idx * 512
+                    records_before = page_idx * RECORDS_PER_PAGE
                     remaining = pr.num_tail_records - records_before
-                    if remaining > 512:
-                        page.num_records = 512
+                    if remaining > RECORDS_PER_PAGE:
+                        page.num_records = RECORDS_PER_PAGE
                     elif remaining > 0:
                         page.num_records = remaining
                     else:
@@ -294,6 +300,13 @@ class Database:
             else:
                 table.current_tail_page_range = table.page_ranges[-1]
 
-        # rebuild indexes (primary key + any others created later)
-        table.index = Index(table, create_index=True)
+        # rebuild indexes (primary key + any others that were saved)
+        table.index = Index(table, create_index=True)  # This creates the primary key index
+        
+        # Restore indexes on other columns that were saved
+        indexed_columns = metadata.get("indexed_columns", [])
+        for col_num in indexed_columns:
+            if col_num != key_idx:  # Primary key is already indexed
+                table.index.create_index(col_num)
+        
         self.tables[table_name] = table
