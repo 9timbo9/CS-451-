@@ -208,6 +208,12 @@ class Table:
         self._merge_in_progress = threading.Lock()  # prevents concurrent merges
         self._start_merge_thread()
 
+        # Transaction support
+        self.lock_manager = None
+        self.transaction_id = None
+        self._transaction_modifications = []  # Track changes for rollback
+        self._transaction_modifications_lock = threading.Lock()
+
     def __str__(self):
         return f'Table(name="{self.name}", num_columns={self.num_columns}, key={self.key})'
 
@@ -262,6 +268,9 @@ class Table:
                 if self.index.indices[col_num] is not None:
                     value = columns[col_num]
                     self.index.insert(col_num, value, rid)
+
+            # Record modification for potential rollback
+            self.record_modification(rid, 'insert', new_data=full_record)
 
             return rid
 
@@ -325,6 +334,9 @@ class Table:
         base_record = self.read_record(rid)
         if base_record is None:
             return False
+
+        # Record old state before modification
+        self.record_modification(rid, 'update', old_data=base_record.copy())
 
         latest_values, current_schema = self.get_latest_version(rid)
 
@@ -404,6 +416,9 @@ class Table:
         base_record = self.read_record(rid)
         if base_record is None:
             return False
+
+        # Record old state before deletion
+        self.record_modification(rid, 'delete', old_data=base_record.copy())
 
         range_idx, is_tail, offset = loc
         if is_tail:
@@ -661,3 +676,97 @@ class Table:
             self._merge_thread_stop.set()
             self._merge_thread.join(timeout=5.0) # wait to finish
             self._merge_thread = None
+
+    def record_modification(self, rid, modification_type, old_data=None, new_data=None):
+        """Record a modification for potential rollback"""
+        with self._transaction_modifications_lock:
+            self._transaction_modifications.append({
+                'rid': rid,
+                'type': modification_type,  # 'insert', 'update', 'delete'
+                'old_data': old_data,
+                'new_data': new_data
+            })
+    
+    def rollback_modifications(self):
+        """Rollback all recorded modifications"""
+        with self._transaction_modifications_lock:
+            modifications = self._transaction_modifications.copy()
+            self._transaction_modifications.clear()
+        
+        # Rollback in reverse order
+        for mod in reversed(modifications):
+            try:
+                if mod['type'] == 'insert':
+                    # Delete the inserted record from indexes and page_directory
+                    rid = mod['rid']
+                    with self.page_directory_lock:
+                        loc = self.page_directory.get(rid)
+                    
+                    if loc:
+                        range_idx, is_tail, offset = loc
+                        
+                        # Remove from all indexes
+                        try:
+                            latest_values, _ = self.get_latest_version(rid)
+                            if latest_values:
+                                for col_num in range(self.num_columns):
+                                    if self.index.indices[col_num] is not None:
+                                        value = latest_values[col_num]
+                                        self.index.delete(col_num, value, rid)
+                        except Exception:
+                            pass
+                        
+                        # Remove from page_directory
+                        with self.page_directory_lock:
+                            if rid in self.page_directory:
+                                del self.page_directory[rid]
+                
+                elif mod['type'] == 'update':
+                    # Restore old data
+                    rid = mod['rid']
+                    old_data = mod['old_data']
+                    if old_data:
+                        with self.page_directory_lock:
+                            loc = self.page_directory.get(rid)
+                        if loc:
+                            range_idx, is_tail, offset = loc
+                            with self.page_ranges_lock:
+                                page_range = self.page_ranges[range_idx]
+                            
+                            # Restore base record columns (skip metadata)
+                            with page_range.lock:
+                                for col_idx in range(4, len(old_data)):
+                                    page_range.update_base_column(offset, col_idx, old_data[col_idx])
+                                
+                                # Restore indirection and schema encoding
+                                page_range.update_base_column(offset, INDIRECTION_COLUMN, old_data[INDIRECTION_COLUMN])
+                                page_range.update_base_column(offset, SCHEMA_ENCODING_COLUMN, old_data[SCHEMA_ENCODING_COLUMN])
+                
+                elif mod['type'] == 'delete':
+                    # Restore deleted record by clearing DELETED_RID marker
+                    rid = mod['rid']
+                    old_data = mod['old_data']
+                    
+                    with self.page_directory_lock:
+                        loc = self.page_directory.get(rid)
+                    if loc:
+                        range_idx, is_tail, offset = loc
+                        if not is_tail:
+                            with self.page_ranges_lock:
+                                page_range = self.page_ranges[range_idx]
+                            with page_range.lock:
+                                # Restore RID column to original rid
+                                page_range.update_base_column(offset, RID_COLUMN, old_data[RID_COLUMN])
+                            
+                            # Re-add to indexes with original values
+                            try:
+                                if old_data and len(old_data) > 4:
+                                    user_columns = old_data[4:]
+                                    for col_num in range(self.num_columns):
+                                        if self.index.indices[col_num] is not None:
+                                            value = user_columns[col_num]
+                                            self.index.insert(col_num, value, rid)
+                            except Exception:
+                                pass
+            except Exception as e:
+                print(f"Error during rollback: {e}")

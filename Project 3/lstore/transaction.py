@@ -1,4 +1,7 @@
-from lock_manager import LockType
+from lstore.lock_manager import LockType
+import time
+import threading
+
 class Transaction:
 
     """
@@ -11,6 +14,9 @@ class Transaction:
         self.acquired_locks = set()  # (record_id, lock_type)
         self.modifications = []  
         self.transaction_id = id(self)
+        self.tables_modified = set()  # Track which tables were modified
+        self.max_retries = 100  # Maximum retry attempts
+        self.retry_delay = 0.01  # Initial delay in seconds (10ms)
 
     """
     # Adds the given query to this transaction
@@ -21,15 +27,68 @@ class Transaction:
     """
     def add_query(self, query, table, *args):
         self.queries.append((query, table, args))
+        self.tables_modified.add(table)
 
-    def run(self):
-        """Run transaction with 2PL"""
-        # If no lock manager provided, run without locking (backward compatibility)
-        if self.lock_manager is None:
-            return self._run_without_locking()
+    def run(self, auto_retry=True):
+        """
+        Run transaction with 2PL and automatic retry on failure.
         
-        # Run with 2PL locking
-        return self._run_with_locking()
+        :param auto_retry: if True, automatically retry on abort; if False, return False on abort
+        :return: True if transaction committed, False if failed (and auto_retry=False)
+        """
+        if not auto_retry:
+            # Legacy behavior: single attempt
+            if self.lock_manager is None:
+                return self._run_without_locking()
+            return self._run_with_locking()
+        
+        # Retry loop with exponential backoff
+        retry_count = 0
+        current_delay = self.retry_delay
+        
+        while retry_count < self.max_retries:
+            try:
+                if self.lock_manager is None:
+                    result = self._run_without_locking()
+                else:
+                    result = self._run_with_locking()
+                
+                # If commit succeeded, return True
+                if result:
+                    return True
+                
+                # Transaction aborted, prepare for retry
+                retry_count += 1
+                if retry_count >= self.max_retries:
+                    print(f"Transaction {self.transaction_id} failed after {self.max_retries} retries")
+                    return False
+                
+                # Exponential backoff with jitter
+                time.sleep(current_delay + (time.time() % 0.001))
+                current_delay = min(current_delay * 1.5, 1.0)  # Cap at 1 second
+                
+                # Reset transaction state for retry
+                self._reset_for_retry()
+                
+            except Exception as e:
+                print(f"Transaction error: {e}")
+                retry_count += 1
+                if retry_count >= self.max_retries:
+                    return False
+                time.sleep(current_delay)
+                current_delay = min(current_delay * 1.5, 1.0)
+                self._reset_for_retry()
+        
+        return False
+
+    def _reset_for_retry(self):
+        """Reset transaction state for a retry attempt"""
+        self._aborted = False
+        self.acquired_locks = set()
+        self.modifications = []
+        # Reset transaction ID to get new lock identifiers
+        self.transaction_id = id(self)
+        # Note: queries and tables_modified remain the same
 
     def _run_without_locking(self):
         """Run transaction without locking (original behavior)"""
@@ -46,12 +105,17 @@ class Transaction:
     def _run_with_locking(self):
         """Run transaction with 2PL - growing phase"""
         try:
-            # Phase 1: Acquire all locks
+            # Set transaction context on all tables
+            for table in self.tables_modified:
+                table.transaction_id = self.transaction_id
+                table.lock_manager = self.lock_manager
+            
+            # Phase 1: Acquire all locks (GROW PHASE)
             for query, table, args in self.queries:
                 if not self._acquire_locks_for_query(query, table, args):
                     return self.abort()
             
-            # Phase 2: Execute all operations
+            # Phase 2: Execute all operations (EXECUTION PHASE)
             for query, table, args in self.queries:
                 # Store state before modification for rollback
                 if query.__name__ in ['update', 'delete']:
@@ -61,6 +125,7 @@ class Transaction:
                 if result == False:
                     return self.abort()
             
+            # Phase 3: Commit and release locks (SHRINK PHASE)
             return self.commit()
         
         except Exception as e:
@@ -148,14 +213,21 @@ class Transaction:
         """Abort transaction and rollback changes"""
         self._aborted = True
         
-        # Rollback modifications (simplified - in real implementation, restore old state)
-        for table, record_id, old_data in reversed(self.modifications):
-            # This would require a restore_record method in Table
-            pass
+        # Rollback modifications on all affected tables
+        for table in self.tables_modified:
+            try:
+                table.rollback_modifications()
+            except Exception as e:
+                print(f"Error rolling back modifications for {table.name}: {e}")
         
         # Release all locks
         if self.lock_manager:
             self.lock_manager.release_locks(self.transaction_id)
+        
+        # Clear transaction context
+        for table in self.tables_modified:
+            table.transaction_id = None
+            table.lock_manager = None
         
         return False
 
@@ -167,6 +239,16 @@ class Transaction:
         # Release all locks (shrinking phase of 2PL)
         if self.lock_manager:
             self.lock_manager.release_locks(self.transaction_id)
+        
+        # Clear transaction context
+        for table in self.tables_modified:
+            table.transaction_id = None
+            table.lock_manager = None
+        
+        # Clear recorded modifications since we're committing
+        for table in self.tables_modified:
+            with table._transaction_modifications_lock:
+                table._transaction_modifications.clear()
         
         return True
 

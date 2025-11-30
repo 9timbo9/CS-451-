@@ -8,40 +8,135 @@ class Query:
     """
     def __init__(self, table):
         self.table = table
+        self.acquired_locks = []  # Track locks acquired in this query
+
+    def _get_page_ranges_for_rids(self, rids):
+        """Get unique page ranges for given RIDs"""
+        page_ranges = set()
+        with self.table.page_directory_lock:
+            for rid in rids:
+                loc = self.table.page_directory.get(rid)
+                if loc is not None:
+                    range_idx, is_tail, offset = loc
+                    page_ranges.add(range_idx)
+        return sorted(page_ranges)
+
+    def _acquire_locks(self, rids, lock_type):
+        """
+        Acquire page range locks for given RIDs.
+        If any lock cannot be acquired, release all locks and return False.
+        """
+        if self.table.lock_manager is None:
+            return True
+        
+        # Get unique page ranges
+        page_ranges = self._get_page_ranges_for_rids(rids)
+        acquired = []
+        
+        try:
+            for range_idx in page_ranges:
+                # Use page range index as lock identifier (as a string)
+                lock_id = f"page_range_{self.table.name}_{range_idx}"
+                if self.table.lock_manager.acquire_lock(
+                    self.table.transaction_id, lock_id, lock_type
+                ):
+                    acquired.append((lock_id, lock_type))
+                else:
+                    # Lock acquisition failed - release and return
+                    self._release_locks(acquired)
+                    return False
+            # Store acquired locks for later release in shrink phase
+            self.acquired_locks.extend(acquired)
+            return True
+        except Exception as e:
+            # Release any locks acquired before exception
+            self._release_locks(acquired)
+            return False
+
+    def _release_locks(self, locks):
+        """Release a list of locks"""
+        if self.table.lock_manager is None:
+            return
+        
+        for lock_id, lock_type in locks:
+            try:
+                self.table.lock_manager.release_lock(self.table.transaction_id, lock_id)
+            except Exception:
+                pass
+
+    def _begin_2pl(self):
+        """Begin 2PL - reset acquired locks for this query"""
+        self.acquired_locks = []
+
+    def _end_2pl(self):
+        """End 2PL - release all locks acquired during grow phase (shrink phase)"""
+        self._release_locks(self.acquired_locks)
+        self.acquired_locks = []
 
     def delete(self, primary_key, transaction=None):
         """
-        Delete records matching the primary_key
+        Delete records matching the primary_key with 2PL (page range level)
         """
+        self._begin_2pl()
         try:
             rids = self.table.index.locate(self.table.key, primary_key)
             if not rids:
+                self._end_2pl()
                 return False
 
+            # GROW PHASE: Acquire exclusive page range locks
+            if not self._acquire_locks(rids, 'EXCLUSIVE'):
+                self._end_2pl()
+                return False
+
+            # EXECUTION PHASE: Perform operations
             for rid in rids:
                 deleted = self.table.delete_record(rid)
                 if deleted is False:
+                    self._end_2pl()
                     return False
+            
+            # SHRINK PHASE: Release all locks
+            self._end_2pl()
             return True
         except Exception as e:
             print(f"Delete error: {e}")
+            self._end_2pl()
             return False
 
     def insert(self, *columns, transaction=None):
         """
-        Insert a record with specified columns
+        Insert a record with specified columns using 2PL (page range level)
         """
+        self._begin_2pl()
         try:
+            # GROW PHASE: Acquire page range lock for base records
+            if self.table.lock_manager:
+                page_range = self.table._get_or_create_page_range()
+                lock_id = f"page_range_{self.table.name}_{page_range.range_idx}"
+                if not self.table.lock_manager.acquire_lock(
+                    self.table.transaction_id, lock_id, 'EXCLUSIVE'
+                ):
+                    self._end_2pl()
+                    return False
+                self.acquired_locks.append((lock_id, 'EXCLUSIVE'))
+            
+            # EXECUTION PHASE: Perform operation
             rid = self.table.insert(*columns)
+            
+            # SHRINK PHASE: Release all locks
+            self._end_2pl()
             return rid is not None
         except Exception as e:
             print(f"Insert error: {e}")
+            self._end_2pl()
             return False
 
     def select(self, search_key, search_key_index, projected_columns_index, transaction=None):
         """
-        Read matching records with specified search key.
+        Read matching records with specified search key using 2PL (page range level)
         """
+        self._begin_2pl()
         try:
             results = []
             rids = set()
@@ -54,16 +149,22 @@ class Query:
 
             # If no index or no results, do full scan
             if not rids:
-                for rid, (range_idx, is_tail, offset) in self.table.page_directory.items():
-                    if is_tail:
-                        continue
-                    values, _schema = self.table.get_latest_version(rid)
-                    if values is None:
-                        continue
-                    if values[search_key_index] == search_key:
-                        rids.add(rid)
+                with self.table.page_directory_lock:
+                    for rid, (range_idx, is_tail, offset) in list(self.table.page_directory.items()):
+                        if is_tail:
+                            continue
+                        values, _schema = self.table.get_latest_version(rid)
+                        if values is None:
+                            continue
+                        if search_key_index < len(values) and values[search_key_index] == search_key:
+                            rids.add(rid)
 
-            # Retrieve records
+            # GROW PHASE: Acquire shared page range locks (only if lock_manager exists)
+            if rids and not self._acquire_locks(rids, 'SHARED'):
+                self._end_2pl()
+                return False
+
+            # EXECUTION PHASE: Retrieve records
             for rid in rids:
                 values, _schema = self.table.get_latest_version(rid)
                 if values is None:
@@ -76,108 +177,104 @@ class Query:
 
                 results.append(Record(rid, values[self.table.key], projected))
 
+            # SHRINK PHASE: Release all locks
+            self._end_2pl()
             return results
         except Exception as e:
             print(f"Select error: {e}")
+            self._end_2pl()
             return False
-
-    
-    def _select_impl(self, search_key, search_key_index, projected_columns_index):
-        # Your existing select implementation
-        try:
-            results = []
-            rids = self.table.index.locate(search_key_index, search_key)
-            
-            for rid in rids:
-                values, _schema = self.table.get_latest_version(rid)
-                if values is None:
-                    continue
-                
-                projected = [
-                    v if bit else None
-                    for v, bit in zip(values, projected_columns_index)
-                ]
-                results.append(Record(rid, values[self.table.key], projected))
-            
-            return results
-        except Exception:
-            return False
-    
-    # Similar modifications for update, insert, delete
-
-
 
     def update(self, primary_key, *columns):
         """
-        # Update a record with specified key and columns
-        # Returns True if update is succesful
-        # Returns False if no records exist with given key or if the target record cannot be accessed due to 2PL locking
+        Update a record with specified key and columns using 2PL (page range level)
         """
+        self._begin_2pl()
         try:
             # make sure caller passed exactly num_columns positional values
             if len(columns) != self.table.num_columns:
+                self._end_2pl()
                 return False
 
             # cannot update primary key via update
             if columns[self.table.key] is not None and columns[self.table.key] != primary_key:
                 if self.table.index.locate(self.table.key, columns[self.table.key]):
+                    self._end_2pl()
                     return False
 
             # locate RIDs for a given primary key via its index
             rids = self.table.index.locate(self.table.key, primary_key)
             if not rids or any(r is None for r in rids):
+                self._end_2pl()
                 return False
-            # apply update for each RID
+            
+            # GROW PHASE: Acquire exclusive page range locks
+            if not self._acquire_locks(rids, 'EXCLUSIVE'):
+                self._end_2pl()
+                return False
+            
+            # EXECUTION PHASE: Perform updates
             for rid in rids:
                 ok = self.table.update_record(rid, *columns)
                 if ok is False:
+                    self._end_2pl()
                     return False
 
+            # SHRINK PHASE: Release all locks
+            self._end_2pl()
             return True
         except Exception:
+            self._end_2pl()
             return False
 
     def sum(self, start_range, end_range, aggregate_column_index):
         """
-        :param start_range: int             # Start of the key range to aggregate
-        :param end_range: int               # End of the key range to aggregate
-        :param aggregate_column_index: int  # Index of desired column to aggregate
-        # this function is only called on the primary key.
-        # Returns the summation of the given range upon success
-        # Returns False if no record exists in the given range
+        Sum aggregation with 2PL (page range level)
         """
+        self._begin_2pl()
         try:
-            # get all rids whose in [start_range, end_range]
             rids = self.table.index.locate_range(start_range, end_range, self.table.key)
-            if not rids:  # classic
+            if not rids:
+                self._end_2pl()
                 return False
+            
+            # GROW PHASE: Acquire shared page range locks
+            if not self._acquire_locks(rids, 'SHARED'):
+                self._end_2pl()
+                return False
+            
+            # EXECUTION PHASE: Perform summation
             total = 0
             for rid in rids:
-                values, _ = self.table.get_latest_version(rid)  # summation
+                values, _ = self.table.get_latest_version(rid)
                 if values is None:
                     continue
                 total += values[aggregate_column_index]
+            
+            # SHRINK PHASE: Release all locks
+            self._end_2pl()
             return total
         except Exception:
+            self._end_2pl()
             return False
 
     def select_version(self, search_key, search_key_index, projected_columns_index, relative_version):
         """
-        Read matching record with specified search key and version
-        :param search_key: the value you want to search based on
-        :param search_key_index: the column index you want to search based on
-        :param projected_columns_index: what columns to return. array of 1 or 0 values.
-        :param relative_version: the relative version of the record you need to retrieve.
-        Returns a list of Record objects upon success
-        Returns False if record locked by TPL
-        Assume that select will never be called on a key that doesn't exist
+        Read specific version with 2PL (page range level)
         """
+        self._begin_2pl()
         try:
-            # RIDs with matching search key
             rids = self.table.index.locate(search_key_index, search_key)
             if not rids:
+                self._end_2pl()
                 return []
 
+            # GROW PHASE: Acquire shared page range locks
+            if not self._acquire_locks(rids, 'SHARED'):
+                self._end_2pl()
+                return False
+
+            # EXECUTION PHASE: Retrieve records
             results = []
             for rid in rids:
                 values, _schema = self.table.get_version(rid, relative_version)
@@ -191,31 +288,40 @@ class Query:
 
                 results.append(Record(rid, values[self.table.key], projected))
 
+            # SHRINK PHASE: Release all locks
+            self._end_2pl()
             return results if results else []
         except Exception:
+            self._end_2pl()
             return False
 
     def sum_version(self, start_range, end_range, aggregate_column_index, relative_version):
         """
-        :param start_range: int             # Start of the key range to aggregate
-        :param end_range: int               # End of the key range to aggregate
-        :param aggregate_column_index: int  # Index of desired column to aggregate
-        :param relative_version: the relative version of the record you need to retrieve.
-        # this function is only called on the primary key.
-        # Returns the summation of the given range upon success
-        # Returns False if no record exists in the given range
+        Sum version aggregation with 2PL (page range level)
         """
+        self._begin_2pl()
         try:
-            # get all rids whose in [start_range, end_range]
             rids = self.table.index.locate_range(start_range, end_range, self.table.key)
             if not rids:
+                self._end_2pl()
                 return False
+            
+            # GROW PHASE: Acquire shared page range locks
+            if not self._acquire_locks(rids, 'SHARED'):
+                self._end_2pl()
+                return False
+            
+            # EXECUTION PHASE: Perform summation
             total = 0
             for rid in rids:
                 values, _ = self.table.get_version(rid, relative_version)
                 if values is None:
                     continue
                 total += values[aggregate_column_index]
+            
+            # SHRINK PHASE: Release all locks
+            self._end_2pl()
             return total
         except Exception:
+            self._end_2pl()
             return False
