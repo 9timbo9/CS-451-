@@ -7,12 +7,12 @@ class TransactionWorker:
     """
     # Creates a transaction worker object.
     """
-    def __init__(self, transactions = None):
+    def __init__(self, transactions=None, db=None):
         self.stats = []
-        # avoid shared list across instances
         self.transactions = list(transactions) if transactions else []
         self.result = 0
         self._thread = None
+        self.db = db
 
     
     """
@@ -39,15 +39,22 @@ class TransactionWorker:
         if self._thread is not None:
             self._thread.join()
 
-
     def __run(self):
-        for transaction in self.transactions:
-            try:
-                ok = transaction.run()
-            # each transaction returns True if committed or False if aborted
-            except Exception:
-                ok = False
-            self.stats.append(ok)
-        # stores the number of transactions that committed
-        self.result = sum(1 for ok in self.stats if ok)
+            for transaction in self.transactions:
+                committed = False
+                attempts = 0
+                max_attempts = 10  # Prevent infinite loops
+                
+                # Keep retrying until transaction commits or max attempts reached
+                while not committed and attempts < max_attempts:
+                    try:
+                        committed = transaction.run()
+                        attempts += 1
+                    except Exception:
+                        committed = False
+                        attempts += 1
+                
+                self.stats.append(committed)
+            
+            self.result = sum(1 for ok in self.stats if ok)
 

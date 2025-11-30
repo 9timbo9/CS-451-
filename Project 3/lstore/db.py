@@ -1,5 +1,5 @@
 from lstore.table import Table, PageRange
-from lstore.page import Page
+from lstore.transaction import Transaction
 from lstore.index import Index
 from lstore.disk import DiskManager
 from lstore.bufferpool import Bufferpool
@@ -9,13 +9,24 @@ import shutil
 
 
 class Database:
-
     def __init__(self):
-        self.tables = {}  # Store tables by name
+        self.tables = {} # Store tables by name
         self.path = None
         self.disk_manager = None
         self.bufferpool = None
-
+        self.lock_manager = None
+    
+    def create_transaction(self, use_locking=True):
+        """Create a new transaction"""
+        if use_locking and self.lock_manager is None:
+            from lstore.lock_manager import LockManager
+            self.lock_manager = LockManager()
+        
+        if use_locking:
+            return Transaction(self.lock_manager)
+        else:
+            return Transaction()  # without locking for backward compatibility
+    
     def __str__(self):
         return f"Database(tables={list(self.tables.keys())})"
 
