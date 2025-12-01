@@ -683,6 +683,7 @@ class Table:
         """Record a modification for potential rollback"""
         with self._transaction_modifications_lock:
             self._transaction_modifications.append({
+                'transaction_id': self.transaction_id,
                 'rid': rid,
                 'type': modification_type,  # 'insert', 'update', 'delete'
                 'old_data': old_data,
@@ -691,9 +692,12 @@ class Table:
     
     def rollback_modifications(self):
         """Rollback all recorded modifications"""
+        current_transaction_id = self.transaction_id
+
         with self._transaction_modifications_lock:
-            modifications = self._transaction_modifications.copy()
-            self._transaction_modifications.clear()
+            # Filter to only add this transaction's modifications
+            modifications = [m for m in self._transaction_modifications if m['transaction_id'] == current_transaction_id]
+            self._transaction_modifications = [m for m in self._transaction_modifications if m['transaction_id'] != current_transaction_id]
         
         # Rollback in reverse order
         for mod in reversed(modifications):
@@ -706,6 +710,11 @@ class Table:
                     
                     if loc:
                         range_idx, is_tail, offset = loc
+
+                        with self.page_ranges_lock:
+                            page_range = self.page_ranges[range_idx]
+                        with page_range.lock:
+                            page_range.update_base_column(offset, RID_COLUMN, self.DELETED_RID)
                         
                         # Remove from all indexes
                         try:
