@@ -389,9 +389,10 @@ class Table:
             base_pr.update_base_column(base_offset, SCHEMA_ENCODING_COLUMN, new_schema)
 
         # update all relevant secondary indexes
-        for col_num, old_value, new_value in updated_columns_info:
-            if self.index.indices[col_num] is not None:
-                self.index.update(col_num, old_value, new_value, rid)
+        with self.index_lock:
+            for col_num, old_value, new_value in updated_columns_info:
+                if self.index.indices[col_num] is not None:
+                    self.index.update(col_num, old_value, new_value, rid)
 
         with self._rids_to_merge_lock:
             self._rids_to_merge.add(rid)
@@ -437,10 +438,11 @@ class Table:
             pr.update_base_column(offset, RID_COLUMN, self.DELETED_RID)
 
         # drop from indexes using latest values
-        for col_num in range(self.num_columns):
-            if self.index.indices[col_num] is not None:
-                value = latest_values[col_num]
-                self.index.delete(col_num, value, rid)
+        with self.index_lock:
+            for col_num in range(self.num_columns):
+                if self.index.indices[col_num] is not None:
+                    value = latest_values[col_num]
+                    self.index.delete(col_num, value, rid)
 
         return True
     
