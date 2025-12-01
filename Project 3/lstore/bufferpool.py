@@ -1,3 +1,4 @@
+import threading
 from collections import OrderedDict
 from lstore.page import Page
 
@@ -12,6 +13,7 @@ class Bufferpool:
 
         # Imma go with a LRU, 
         self.lru = OrderedDict()  # ordereddict LRU solution
+        self.lock = threading.RLock()
 
     def fix_page(self, page_id, mode="r"):
         """
@@ -19,58 +21,62 @@ class Bufferpool:
         pin it, and return the Page object.
         mode is "r" or "w" (for now just semantic).
         """
-        # already in buffer
-        if page_id in self.frames:
-            frame = self.frames[page_id]
-            frame["pin"] += 1
-            # refresh LRU
-            self.lru.move_to_end(page_id)
-            return frame["page"]
+        with self.lock:
+            # already in buffer
+            if page_id in self.frames:
+                frame = self.frames[page_id]
+                frame["pin"] += 1
+                # refresh LRU
+                self.lru.move_to_end(page_id)
+                return frame["page"]
 
-        # need to load; maybe evict if full
-        if len(self.frames) >= self.capacity:
-            self.evict()
+            # need to load; maybe evict if full
+            if len(self.frames) >= self.capacity:
+                self.evict()
 
-        # load from disk
-        table, is_tail, col, rng, idx = page_id
-        raw = self.disk.read_page(table, is_tail, col, rng, idx)
+            # load from disk
+            table, is_tail, col, rng, idx = page_id
+            raw = self.disk.read_page(table, is_tail, col, rng, idx)
 
-        page = Page()            # create empty page
-        page.data[:] = raw     
+            page = Page()            # create empty page
+            page.data[:] = raw     
 
-        self.frames[page_id] = {"page": page, "pin": 1, "dirty": False}
-        self.lru[page_id] = True
-        return page
+            self.frames[page_id] = {"page": page, "pin": 1, "dirty": False}
+            self.lru[page_id] = True
+            return page
 
     def unfix_page(self, page_id, dirty=False):
         """
         Unpin the page (transaction done using it).
         Mark dirty if the caller wrote to it.
         """
-        frame = self.frames.get(page_id)
-        if frame is None:
-            return
+        with self.lock:
+            frame = self.frames.get(page_id)
+            if frame is None:
+                return
 
-        if frame["pin"] > 0:
-            frame["pin"] -= 1
+            if frame["pin"] > 0:
+                frame["pin"] -= 1
 
-        if dirty:
-            frame["dirty"] = True
+            if dirty:
+                frame["dirty"] = True
 
     def flush(self, page_id):
-        frame = self.frames.get(page_id)
-        if not frame:
-            return
-        if not frame["dirty"]:
-            return
+        with self.lock:
+            frame = self.frames.get(page_id)
+            if not frame:
+                return
+            if not frame["dirty"]:
+                return
 
-        table, is_tail, col, rng, idx = page_id
-        self.disk.write_page(table, is_tail, col, rng, idx, frame["page"].data)  # update new stuff writes on disk
-        frame["dirty"] = False  # clean now
+            table, is_tail, col, rng, idx = page_id
+            self.disk.write_page(table, is_tail, col, rng, idx, frame["page"].data)  # update new stuff writes on disk
+            frame["dirty"] = False  # clean now
 
     def flush_all(self):  # call this at close() in db to
-        for pid in list(self.frames.keys()):
-            self.flush(pid)
+        with self.lock:
+            for pid in list(self.frames.keys()):
+                self.flush(pid)
 
     def evict(self):
         """

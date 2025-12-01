@@ -576,11 +576,10 @@ class Table:
                     if latest_values is None:
                         continue
 
-                    for user_col_idx, value in enumerate(latest_values):
-                        physical_col_idx = 4 + user_col_idx  # skip metadata columns
-                        page_range.update_base_column(offset, physical_col_idx, value)
-
-                    page_range.update_base_column(offset, SCHEMA_ENCODING_COLUMN, schema_encoding)
+                    # NOTE: We intentionally do NOT copy values into base record
+                    # to preserve original values for historical version queries.
+                    # The base record keeps its original values; latest values
+                    # are always retrieved by following the tail chain.
 
                     # Update TPS
                     pid = page_range._page_id(False, RID_COLUMN, page_index)
@@ -592,50 +591,9 @@ class Table:
             finally:
                 page_range.lock.release()
 
-        for page_range in merged_ranges:
-            acquired = page_range.lock.acquire(blocking=False)
-            if not acquired:
-                continue
-            try:
-                # Skip if its the active tail range (at start or now)
-                if page_range is self.current_tail_page_range or page_range is start_tail_range:
-                    continue
-
-                num_tail = page_range.num_tail_records
-                
-                if num_tail == 0:
-                    continue  # no tail pages to clean
-                
-                # remove tail pages from bufferpool
-
-                for col_idx in range(page_range.num_columns):
-                    num_tail_pages = page_range.num_tail_pages_per_col[col_idx]
-                    for page_idx in range(num_tail_pages):
-                        pid = page_range._page_id(True, col_idx, page_idx)
-                        
-                        # Evict from bufferpool if present
-                        try:
-                            if pid in self.bufferpool.frames:
-                                self.bufferpool.flush(pid)
-                                del self.bufferpool.frames[pid]
-                                if pid in self.bufferpool.lru:
-                                    del self.bufferpool.lru[pid]
-                        except Exception:
-                            pass
-                        
-                        # Delete file from disk
-                        path = self.bufferpool.disk.page_path(self.name, True, col_idx, page_range.range_idx, page_idx)
-                        if os.path.exists(path):
-                            try:
-                                os.remove(path)
-                            except OSError:
-                                pass
-                    
-                # Reset tail record tracking for this page range
-                page_range.num_tail_records = 0
-                page_range.num_tail_pages_per_col = [1] * page_range.num_columns
-            finally:
-                page_range.lock.release()
+        # NOTE: Tail records are intentionally NOT deleted after merge
+        # to preserve historical versions for select_version queries.
+        # The merge only consolidates values into base records for faster reads.
 
     def merge(self):
         """Public method to trigger merge"""
@@ -752,6 +710,18 @@ class Table:
                                 # Restore indirection and schema encoding
                                 page_range.update_base_column(offset, INDIRECTION_COLUMN, old_data[INDIRECTION_COLUMN])
                                 page_range.update_base_column(offset, SCHEMA_ENCODING_COLUMN, old_data[SCHEMA_ENCODING_COLUMN])
+                        try:
+                            current_values, _ = self.get_latest_version(rid)
+                            if current_values and old_data and len(old_data) > 4:
+                                old_user_columns = old_data[4:]
+                                for col_num in range(self.num_columns):
+                                    if self.index.indices[col_num] is not None:
+                                        old_value = old_user_columns[col_num]
+                                        new_value = current_values[col_num]
+                                        if old_value != new_value:
+                                            self.index.update(col_num, new_value, old_value, rid)
+                        except Exception:
+                            pass
                 
                 elif mod['type'] == 'delete':
                     # Restore deleted record by clearing DELETED_RID marker

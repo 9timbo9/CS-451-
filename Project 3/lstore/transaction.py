@@ -267,7 +267,7 @@ class Transaction:
         # Clear recorded modifications since we're committing
         for table in self.tables_modified:
             with table._transaction_modifications_lock:
-                table._transaction_modifications.clear()
+                table._transaction_modifications = [m for m in table._transaction_modifications if m['transaction_id'] != self.transaction_id]
         
         return True
 
