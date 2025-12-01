@@ -95,7 +95,7 @@ class Index:
             idx_map, head, tail = column_index
             node = idx_map.get(value)
             if node:
-                return node.rids
+                return node.rids.copy()
             return set()
 
         # scan page_directory if no index
@@ -136,7 +136,7 @@ class Index:
         while cur_node and cur_node.value < begin:
             cur_node = cur_node.next
         while cur_node and cur_node.value <= end:
-            result.update(cur_node.rids)
+            result.update(cur_node.rids.copy())
             cur_node = cur_node.next
         return result
 

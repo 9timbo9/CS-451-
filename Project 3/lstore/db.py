@@ -4,6 +4,7 @@ from lstore.index import Index
 from lstore.disk import DiskManager
 from lstore.bufferpool import Bufferpool
 from lstore.config import BUFFERPOOL_CAPACITY, RECORDS_PER_PAGE
+from lstore.lock_manager import LockManager
 import os
 import shutil
 
@@ -19,7 +20,6 @@ class Database:
     def create_transaction(self, use_locking=True):
         """Create a new transaction"""
         if use_locking and self.lock_manager is None:
-            from lstore.lock_manager import LockManager
             self.lock_manager = LockManager()
         
         if use_locking:
@@ -38,6 +38,7 @@ class Database:
         self.path = path
         self.disk_manager = DiskManager(path)
         self.bufferpool = Bufferpool(self.disk_manager, bufferpool_capacity)
+        self.lock_manager = LockManager()
         if not os.path.exists(path):
             return  # No existing database to load
         # Delete existing files if specified
@@ -138,6 +139,9 @@ class Database:
             self.bufferpool = Bufferpool(self.disk_manager, BUFFERPOOL_CAPACITY)
 
         table = Table(name, num_columns, key_index, bufferpool=self.bufferpool)
+        if self.lock_manager is None:
+            self.lock_manager = LockManager()
+        table.lock_manager = self.lock_manager
         self.tables[name] = table
         return table
 
@@ -320,4 +324,5 @@ class Database:
             if col_num != key_idx:  # Primary key is already indexed
                 table.index.create_index(col_num)
         
+        table.lock_manager = self.lock_manager
         self.tables[table_name] = table

@@ -1,5 +1,6 @@
 from lstore.table import Table, Record
 from lstore.index import Index
+from lstore.lock_manager import LockType
 
 
 class Query:
@@ -60,7 +61,7 @@ class Query:
         
         for lock_id, lock_type in locks:
             try:
-                self.table.lock_manager.release_lock(self.table.transaction_id, lock_id)
+                self.table.lock_manager.release_locks(self.table.transaction_id)
             except Exception:
                 pass
 
@@ -85,7 +86,7 @@ class Query:
                 return False
 
             # GROW PHASE: Acquire exclusive page range locks
-            if not self._acquire_locks(rids, 'EXCLUSIVE'):
+            if not self._acquire_locks(rids, LockType.EXCLUSIVE):
                 self._end_2pl()
                 return False
 
@@ -115,11 +116,11 @@ class Query:
                 page_range = self.table._get_or_create_page_range()
                 lock_id = f"page_range_{self.table.name}_{page_range.range_idx}"
                 if not self.table.lock_manager.acquire_lock(
-                    self.table.transaction_id, lock_id, 'EXCLUSIVE'
+                    self.table.transaction_id, lock_id, LockType.EXCLUSIVE
                 ):
                     self._end_2pl()
                     return False
-                self.acquired_locks.append((lock_id, 'EXCLUSIVE'))
+                self.acquired_locks.append((lock_id, LockType.EXCLUSIVE))
             
             # EXECUTION PHASE: Perform operation
             rid = self.table.insert(*columns)
@@ -160,7 +161,7 @@ class Query:
                             rids.add(rid)
 
             # GROW PHASE: Acquire shared page range locks (only if lock_manager exists)
-            if rids and not self._acquire_locks(rids, 'SHARED'):
+            if rids and not self._acquire_locks(rids, LockType.SHARED):
                 self._end_2pl()
                 return False
 
@@ -209,7 +210,7 @@ class Query:
                 return False
             
             # GROW PHASE: Acquire exclusive page range locks
-            if not self._acquire_locks(rids, 'EXCLUSIVE'):
+            if not self._acquire_locks(rids, LockType.EXCLUSIVE):
                 self._end_2pl()
                 return False
             
@@ -239,7 +240,7 @@ class Query:
                 return False
             
             # GROW PHASE: Acquire shared page range locks
-            if not self._acquire_locks(rids, 'SHARED'):
+            if not self._acquire_locks(rids, LockType.SHARED):
                 self._end_2pl()
                 return False
             
@@ -270,7 +271,7 @@ class Query:
                 return []
 
             # GROW PHASE: Acquire shared page range locks
-            if not self._acquire_locks(rids, 'SHARED'):
+            if not self._acquire_locks(rids, LockType.SHARED):
                 self._end_2pl()
                 return False
 
@@ -307,7 +308,7 @@ class Query:
                 return False
             
             # GROW PHASE: Acquire shared page range locks
-            if not self._acquire_locks(rids, 'SHARED'):
+            if not self._acquire_locks(rids, LockType.SHARED):
                 self._end_2pl()
                 return False
             

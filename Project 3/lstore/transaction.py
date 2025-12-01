@@ -1,4 +1,4 @@
-from lstore.lock_manager import LockType
+from lstore.lock_manager import LockType, LockManager
 import time
 import threading
 
@@ -10,7 +10,8 @@ class Transaction:
     def __init__(self, lock_manager=None):
         self.queries = []
         self._aborted = False
-        self.lock_manager = lock_manager
+        self._provided_lock_manager = lock_manager  # Store if explicitly provided
+        self.lock_manager = lock_manager  # May be None initially
         self.acquired_locks = set()  # (record_id, lock_type)
         self.modifications = []  
         self.transaction_id = id(self)
@@ -36,6 +37,13 @@ class Transaction:
         :param auto_retry: if True, automatically retry on abort; if False, return False on abort
         :return: True if transaction committed, False if failed (and auto_retry=False)
         """
+        # Try to get lock manager from tables if not set
+        if self.lock_manager is None and self.tables_modified:
+            for table in self.tables_modified:
+                if hasattr(table, 'lock_manager') and table.lock_manager is not None:
+                    self.lock_manager = table.lock_manager
+                    break
+        
         if not auto_retry:
             # Legacy behavior: single attempt
             if self.lock_manager is None:
@@ -105,6 +113,17 @@ class Transaction:
     def _run_with_locking(self):
         """Run transaction with 2PL - growing phase"""
         try:
+            # Get lock manager from first table if not provided
+            if self.lock_manager is None and self.tables_modified:
+                for table in self.tables_modified:
+                    if hasattr(table, 'lock_manager') and table.lock_manager is not None:
+                        self.lock_manager = table.lock_manager
+                        break
+            
+            # If still no lock manager, create one
+            if self.lock_manager is None:
+                self.lock_manager = LockManager()
+            
             # Set transaction context on all tables
             for table in self.tables_modified:
                 table.transaction_id = self.transaction_id
