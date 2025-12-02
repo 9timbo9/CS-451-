@@ -10,6 +10,7 @@ class Query:
     def __init__(self, table):
         self.table = table
         self.acquired_locks = []  # Track locks acquired in this query
+        self.transaction_id = None  # Transaction context for locking
 
     def _get_page_ranges_for_rids(self, rids):
         """Get unique page ranges for given RIDs"""
@@ -30,6 +31,11 @@ class Query:
         if self.table.lock_manager is None:
             return True
         
+        # Use transaction_id from query (set by transaction) or table
+        transaction_id = self.transaction_id or getattr(self.table, 'transaction_id', None)
+        if transaction_id is None:
+            transaction_id = id(self)  # Fallback to query object ID
+        
         # Get unique page ranges
         page_ranges = self._get_page_ranges_for_rids(rids)
         acquired = []
@@ -39,7 +45,7 @@ class Query:
                 # Use page range index as lock identifier (as a string)
                 lock_id = f"page_range_{self.table.name}_{range_idx}"
                 if self.table.lock_manager.acquire_lock(
-                    self.table.transaction_id, lock_id, lock_type
+                    transaction_id, lock_id, lock_type
                 ):
                     acquired.append((lock_id, lock_type))
                 else:
@@ -78,7 +84,7 @@ class Query:
         """
         Delete records matching the primary_key with 2PL (page range level)
         """
-        in_transaction = self.table.transaction_id is not None
+        in_transaction = transaction is not None and hasattr(transaction, 'transaction_id')
 
         if not in_transaction:
             self._begin_2pl()
@@ -101,7 +107,6 @@ class Query:
             
             return True
         except Exception as e:
-            print(f"Delete error: {e}")
             return False
         finally:
             if not in_transaction:
@@ -111,7 +116,7 @@ class Query:
         """
         Insert a record with specified columns using 2PL (page range level)
         """
-        in_transaction = self.table.transaction_id is not None
+        in_transaction = transaction is not None and hasattr(transaction, 'transaction_id')
         
         if not in_transaction:
             self._begin_2pl()
@@ -130,9 +135,11 @@ class Query:
             # EXECUTION PHASE: Perform operation
             rid = self.table.insert(*columns)
             
+            if rid is None:
+                return False
+            
             return rid is not None
         except Exception as e:
-            print(f"Insert error: {e}")
             return False
         finally:
             if not in_transaction:
@@ -142,7 +149,8 @@ class Query:
         """
         Read matching records with specified search key using 2PL (page range level)
         """
-        in_transaction = self.table.transaction_id is not None
+        # Use transaction_id from parameter, not from table (which is shared across threads!)
+        in_transaction = transaction is not None and hasattr(transaction, 'transaction_id')
         
         if not in_transaction:
             self._begin_2pl()
@@ -169,14 +177,14 @@ class Query:
                         if search_key_index < len(values) and values[search_key_index] == search_key:
                             rids.add(rid)
 
-            # GROW PHASE: Acquire shared page range locks (only if standalone)
-            if not in_transaction:
-                if rids and not self._acquire_locks(rids, LockType.SHARED):
-                    return False
+            # GROW PHASE: Acquire shared page range locks
+            if not self._acquire_locks(rids, LockType.SHARED):
+                return False
 
             # EXECUTION PHASE: Retrieve records
             for rid in rids:
                 values, _schema = self.table.get_latest_version(rid)
+                
                 if values is None:
                     continue
 
@@ -186,20 +194,19 @@ class Query:
                 ]
 
                 results.append(Record(rid, values[self.table.key], projected))
-
+            
             return results
         except Exception as e:
-            print(f"Select error: {e}")
             return False
         finally:
             if not in_transaction:
                 self._end_2pl()
 
-    def update(self, primary_key, *columns):
+    def update(self, primary_key, *columns, transaction=None):
         """
         Update a record with specified key and columns using 2PL (page range level)
         """
-        in_transaction = self.table.transaction_id is not None
+        in_transaction = transaction is not None and hasattr(transaction, 'transaction_id')
         
         if not in_transaction:
             self._begin_2pl()
@@ -237,11 +244,11 @@ class Query:
             if not in_transaction:
                 self._end_2pl()
 
-    def sum(self, start_range, end_range, aggregate_column_index):
+    def sum(self, start_range, end_range, aggregate_column_index, transaction=None):
         """
         Sum aggregation with 2PL (page range level)
         """
-        in_transaction = self.table.transaction_id is not None
+        in_transaction = transaction is not None and hasattr(transaction, 'transaction_id')
         
         if not in_transaction:
             self._begin_2pl()
@@ -271,11 +278,11 @@ class Query:
             if not in_transaction:
                 self._end_2pl()
 
-    def select_version(self, search_key, search_key_index, projected_columns_index, relative_version):
+    def select_version(self, search_key, search_key_index, projected_columns_index, relative_version, transaction=None):
         """
         Read specific version with 2PL (page range level)
         """
-        in_transaction = self.table.transaction_id is not None
+        in_transaction = transaction is not None and hasattr(transaction, 'transaction_id')
         
         if not in_transaction:
             self._begin_2pl()
@@ -311,11 +318,11 @@ class Query:
             if not in_transaction:
                 self._end_2pl()
 
-    def sum_version(self, start_range, end_range, aggregate_column_index, relative_version):
+    def sum_version(self, start_range, end_range, aggregate_column_index, relative_version, transaction=None):
         """
         Sum version aggregation with 2PL (page range level)
         """
-        in_transaction = self.table.transaction_id is not None
+        in_transaction = transaction is not None and hasattr(transaction, 'transaction_id')
         
         if not in_transaction:
             self._begin_2pl()

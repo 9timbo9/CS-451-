@@ -125,23 +125,26 @@ class Transaction:
             if self.lock_manager is None:
                 self.lock_manager = LockManager()
             
-            # Set transaction context on all tables
+            # Set transaction context on all tables and queries
             for table in self.tables_modified:
-                table.transaction_id = self.transaction_id
+                # DO NOT set table.transaction_id - it's shared across threads!
+                # Just ensure lock_manager is set
                 table.lock_manager = self.lock_manager
             
             # Phase 1: Acquire all locks (GROW PHASE)
             for query, table, args in self.queries:
+                # Set transaction_id on query object if it's a Query instance
+                if hasattr(query, '__self__') and hasattr(query.__self__, 'transaction_id'):
+                    query.__self__.transaction_id = self.transaction_id
+                
                 if not self._acquire_locks_for_query(query, table, args):
                     return self.abort()
             
             # Phase 2: Execute all operations (EXECUTION PHASE)
-            for query, table, args in self.queries:
-                # Store state before modification for rollback
-                if query.__name__ in ['update', 'delete']:
-                    self._record_pre_modification_state(query, table, args)
+            for idx, (query, table, args) in enumerate(self.queries):
+                # Pass 'self' (transaction) to all queries so they know the transaction context
+                result = query(*args, transaction=self)
                 
-                result = query(*args)
                 if result == False:
                     return self.abort()
             
@@ -149,7 +152,6 @@ class Transaction:
             return self.commit()
         
         except Exception as e:
-            print(f"Transaction error with locking: {e}")
             return self.abort()
 
     def _acquire_locks_for_query(self, query, table, args):
@@ -231,12 +233,14 @@ class Transaction:
 
     def abort(self):
         """Abort transaction and rollback changes"""
+        print(f"Transaction {self.transaction_id} aborted.")
         self._aborted = True
         
         # Rollback modifications on all affected tables
         for table in self.tables_modified:
             try:
-                table.rollback_modifications()
+                # Pass transaction_id so it knows which modifications to rollback
+                table.rollback_modifications(self.transaction_id)
             except Exception as e:
                 print(f"Error rolling back modifications for {table.name}: {e}")
         
@@ -244,10 +248,10 @@ class Transaction:
         if self.lock_manager:
             self.lock_manager.release_locks(self.transaction_id)
         
-        # Clear transaction context
-        for table in self.tables_modified:
-            table.transaction_id = None
-            table.lock_manager = None
+        # Clear transaction context - remove these:
+        # for table in self.tables_modified:
+        #     table.transaction_id = None
+        #     table.lock_manager = None
         
         return False
 
@@ -260,10 +264,10 @@ class Transaction:
         if self.lock_manager:
             self.lock_manager.release_locks(self.transaction_id)
         
-        # Clear transaction context
-        for table in self.tables_modified:
-            table.transaction_id = None
-            table.lock_manager = None
+        # Clear transaction context - remove these:
+        # for table in self.tables_modified:
+        #     table.transaction_id = None
+        #     table.lock_manager = None
         
         # Clear recorded modifications since we're committing
         for table in self.tables_modified:
