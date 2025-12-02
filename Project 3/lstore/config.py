@@ -9,3 +9,6 @@ BUFFERPOOL_CAPACITY = 8192
 
 MERGE_THRESHOLD_UPDATES = 100  # trigger merge after this many updates
 MERGE_CHECK_INTERVAL = 0.05
+
+MAX_RETRIES = 100  # Maximum retry attempts
+RETRY_DELAY = 0.01  # Initial delay in seconds (10ms)

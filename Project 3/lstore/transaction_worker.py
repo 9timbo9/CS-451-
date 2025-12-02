@@ -1,5 +1,6 @@
 from lstore.table import Table, Record
 from lstore.index import Index
+from lstore.config import MAX_RETRIES
 from threading import Thread
 
 class TransactionWorker:
@@ -43,7 +44,7 @@ class TransactionWorker:
             for transaction in self.transactions:
                 committed = False
                 attempts = 0
-                max_attempts = 10  # Prevent infinite loops
+                max_attempts = MAX_RETRIES  # Prevent infinite loops
                 
                 # Keep retrying until transaction commits or max attempts reached
                 while not committed and attempts < max_attempts:

@@ -1,6 +1,8 @@
 from lstore.lock_manager import LockType, LockManager
 import time
 import threading
+from lstore.config import MAX_RETRIES, RETRY_DELAY
+
 
 class Transaction:
 
@@ -16,8 +18,8 @@ class Transaction:
         self.modifications = []  
         self.transaction_id = id(self)
         self.tables_modified = set()  # Track which tables were modified
-        self.max_retries = 100  # Maximum retry attempts
-        self.retry_delay = 0.01  # Initial delay in seconds (10ms)
+        self.max_retries = MAX_RETRIES  # Maximum retry attempts
+        self.retry_delay = RETRY_DELAY  # Initial delay in seconds (10ms)
 
     """
     # Adds the given query to this transaction
