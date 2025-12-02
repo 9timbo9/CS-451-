@@ -127,8 +127,6 @@ class Transaction:
             
             # Set transaction context on all tables and queries
             for table in self.tables_modified:
-                # DO NOT set table.transaction_id - it's shared across threads!
-                # Just ensure lock_manager is set
                 table.lock_manager = self.lock_manager
             
             # Phase 1: Acquire all locks (GROW PHASE)
@@ -142,7 +140,7 @@ class Transaction:
             
             # Phase 2: Execute all operations (EXECUTION PHASE)
             for idx, (query, table, args) in enumerate(self.queries):
-                # Pass 'self' (transaction) to all queries so they know the transaction context
+                # pass the entire transaction context so each thread can use it
                 result = query(*args, transaction=self)
                 
                 if result == False:
@@ -152,6 +150,7 @@ class Transaction:
             return self.commit()
         
         except Exception as e:
+            print(f"Transaction error with locking: {e}")
             return self.abort()
 
     def _acquire_locks_for_query(self, query, table, args):
@@ -248,11 +247,6 @@ class Transaction:
         if self.lock_manager:
             self.lock_manager.release_locks(self.transaction_id)
         
-        # Clear transaction context - remove these:
-        # for table in self.tables_modified:
-        #     table.transaction_id = None
-        #     table.lock_manager = None
-        
         return False
 
     def commit(self):
@@ -263,12 +257,7 @@ class Transaction:
         # Release all locks (shrinking phase of 2PL)
         if self.lock_manager:
             self.lock_manager.release_locks(self.transaction_id)
-        
-        # Clear transaction context - remove these:
-        # for table in self.tables_modified:
-        #     table.transaction_id = None
-        #     table.lock_manager = None
-        
+
         # Clear recorded modifications since we're committing
         for table in self.tables_modified:
             with table._transaction_modifications_lock:
