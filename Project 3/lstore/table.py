@@ -2,7 +2,6 @@ from lstore.index import Index
 from lstore.page import Page
 from lstore.config import *
 from time import time
-import os
 import threading
 
 
@@ -39,9 +38,9 @@ class PageRange:
         self.num_tail_pages_per_col = [1] * self.num_columns
 
         # capacity: 16 pages * RECORDS_PER_PAGE records/page
-        self.max_records = RECORDS_PER_PAGE * 16
+        self.max_records = RECORDS_PER_PAGE * PAGES_PER_RANGE
 
-        self.lock = threading.RLock() # per page lock
+        self.lock = threading.RLock()  # per page lock
 
     def has_capacity(self):
         """
@@ -184,7 +183,7 @@ class Table:
         self.current_page_range = None
         self.current_tail_page_range = None
         self.next_rid = 1
-        self.DELETED_RID = 0  # if rid is 0 then it is deleted
+        self.DELETED_RID = DELETED_RID  # if rid is 0 then it is deleted
         self.bufferpool = bufferpool
         self.index = Index(self, create_index)
 
@@ -229,7 +228,6 @@ class Table:
                 self.current_page_range = pr
             return self.current_page_range
 
-    
     def insert(self, *columns):
         """
         Insert a new base record and return the RID of the inserted record.
@@ -290,7 +288,7 @@ class Table:
         with self.page_ranges_lock:
             page_range = self.page_ranges[range_idx]
 
-        with page_range.lock: # lock for the current page range (not whole table)
+        with page_range.lock:  # lock for the current page range (not whole table)
             if not is_tail:
                 record_data = page_range.read_base_record(offset)
             else:
@@ -315,7 +313,7 @@ class Table:
         indirection_rid = base_record[INDIRECTION_COLUMN]
 
         # If there's no tail chain, the base record is the latest
-        if indirection_rid == 0:
+        if indirection_rid == DELETED_RID:
             return base_record[4:], base_record[SCHEMA_ENCODING_COLUMN]
 
         # Otherwise, follow the pointer to the latest tail record
@@ -366,7 +364,7 @@ class Table:
         with self.page_ranges_lock:
             if (
                 self.current_tail_page_range is None
-                or self.current_tail_page_range.num_tail_records >= RECORDS_PER_PAGE * 16
+                or self.current_tail_page_range.num_tail_records >= RECORDS_PER_PAGE * PAGES_PER_RANGE
             ):
                 self.current_tail_page_range = self._get_or_create_page_range()
             page_range = self.current_tail_page_range
@@ -462,21 +460,21 @@ class Table:
 
         # start from latest tail record
         tail_rid = base_record[INDIRECTION_COLUMN]
-        if tail_rid == 0:
+        if tail_rid == DELETED_RID:
             return base_record[4:], base_record[SCHEMA_ENCODING_COLUMN]
 
         steps = abs(relative_version)
         curr_tail_rid = tail_rid
 
         for _ in range(steps):
-            if curr_tail_rid == 0:
+            if curr_tail_rid == DELETED_RID:
                 break
             tail_record = self.read_record(curr_tail_rid)
             if tail_record is None:
                 return None, None
             curr_tail_rid = tail_record[INDIRECTION_COLUMN]
 
-        if curr_tail_rid == 0:
+        if curr_tail_rid == DELETED_RID:
             return base_record[4:], base_record[SCHEMA_ENCODING_COLUMN]
         else:
             version_record = self.read_record(curr_tail_rid)
@@ -550,10 +548,10 @@ class Table:
                     base_rid = base_record[RID_COLUMN]
                     tail_rid = base_record[INDIRECTION_COLUMN]
 
-                    if base_rid == self.DELETED_RID or base_rid == 0:
+                    if base_rid == self.DELETED_RID or base_rid == DELETED_RID:
                         continue
 
-                    if tail_rid == 0:
+                    if tail_rid == DELETED_RID:
                         continue  # no tail to merge
 
                     # Check TPS
@@ -634,7 +632,7 @@ class Table:
         """Stop the background merge thread when table/db is closing"""
         if self._merge_thread is not None:
             self._merge_thread_stop.set()
-            self._merge_thread.join(timeout=5.0) # wait to finish
+            self._merge_thread.join(timeout=5.0)  # wait to finish
             self._merge_thread = None
 
     def record_modification(self, rid, modification_type, old_data=None, new_data=None):

@@ -1,13 +1,12 @@
 from lstore.lock_manager import LockType, LockManager
 import time
-import threading
-from lstore.config import MAX_RETRIES, RETRY_DELAY
+from lstore.config import MAX_RETRIES, RETRY_DELAY, RETRY_BACKOFF_MULTIPLIER, MAX_RETRY_DELAY
 
 
 class Transaction:
 
     """
-    # Creates a transaction object.
+    Creates a transaction object.
     """
     def __init__(self, lock_manager=None):
         self.queries = []
@@ -21,14 +20,14 @@ class Transaction:
         self.max_retries = MAX_RETRIES  # Maximum retry attempts
         self.retry_delay = RETRY_DELAY  # Initial delay in seconds (10ms)
 
-    """
-    # Adds the given query to this transaction
-    # Example:
-    # q = Query(grades_table)
-    # t = Transaction()
-    # t.add_query(q.update, grades_table, 0, *[None, 1, None, 2, None])
-    """
     def add_query(self, query, table, *args):
+        """
+        Adds the given query to this transaction
+        Example:
+        q = Query(grades_table)
+        t = Transaction()
+        t.add_query(q.update, grades_table, 0, *[None, 1, None, 2, None])
+        """
         self.queries.append((query, table, args))
         self.tables_modified.add(table)
 
@@ -75,7 +74,7 @@ class Transaction:
                 
                 # Exponential backoff with jitter
                 time.sleep(current_delay + (time.time() % 0.001))
-                current_delay = min(current_delay * 1.5, 1.0)  # Cap at 1 second
+                current_delay = min(current_delay * RETRY_BACKOFF_MULTIPLIER, MAX_RETRY_DELAY)  # Cap at 1 second
                 
                 # Reset transaction state for retry
                 self._reset_for_retry()
@@ -86,7 +85,7 @@ class Transaction:
                 if retry_count >= self.max_retries:
                     return False
                 time.sleep(current_delay)
-                current_delay = min(current_delay * 1.5, 1.0)
+                current_delay = min(current_delay * RETRY_BACKOFF_MULTIPLIER, MAX_RETRY_DELAY)
                 self._reset_for_retry()
         
         return False

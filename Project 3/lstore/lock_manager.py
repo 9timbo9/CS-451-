@@ -1,9 +1,11 @@
 import threading
 from enum import Enum
 
+
 class LockType(Enum):
     SHARED = 1
     EXCLUSIVE = 2
+
 
 class LockManager:
     def __init__(self):
@@ -27,6 +29,7 @@ class LockManager:
         with self.lock:
             for lock in self.lock_table.values():
                 lock.release(transaction_id)
+
 
 class Lock:
     def __init__(self, record_id):

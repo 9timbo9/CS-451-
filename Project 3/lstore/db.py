@@ -11,7 +11,7 @@ import shutil
 
 class Database:
     def __init__(self):
-        self.tables = {} # Store tables by name
+        self.tables = {}  # Store tables by name
         self.path = None
         self.disk_manager = None
         self.bufferpool = None

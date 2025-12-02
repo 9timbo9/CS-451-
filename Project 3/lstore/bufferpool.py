@@ -90,7 +90,7 @@ class Bufferpool:
             if frame["pin"] == 0:
                 # flush if dirty, then evict
                 if frame["dirty"]:
-                    table, is_tail, col, rng, idx = victim_id # update in the disk
+                    table, is_tail, col, rng, idx = victim_id  # update in the disk
                     self.disk.write_page(table, is_tail, col, rng, idx, frame["page"].data)
                 # remove from structures
                 del self.frames[victim_id]

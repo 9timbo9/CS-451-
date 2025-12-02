@@ -1,5 +1,6 @@
 from lstore.config import RECORDS_PER_PAGE, PAGE_SIZE
 
+
 class Page:
 
     def __init__(self):

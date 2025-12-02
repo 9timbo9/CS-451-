@@ -1,6 +1,3 @@
-from lstore.config import INDIRECTION_COLUMN
-
-
 class IndexNode:
     """
     A node in a doubly linked list used by the index. Holds a value, a set of RIDs for that
@@ -132,7 +129,6 @@ class Index:
 
         idx_map, head, tail = column_index
         cur_node = head
-        # TODO: optimize by binary search
         while cur_node and cur_node.value < begin:
             cur_node = cur_node.next
         while cur_node and cur_node.value <= end:
