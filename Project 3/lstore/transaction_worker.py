@@ -51,6 +51,7 @@ class TransactionWorker:
                         attempts += 1
                     except Exception as e:
                         committed = False
+                        print(f"Transaction error: {e}")
                         attempts += 1
                 
                 self.stats.append(committed)

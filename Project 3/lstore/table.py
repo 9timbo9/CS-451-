@@ -209,7 +209,7 @@ class Table:
 
         # Transaction support
         self.lock_manager = None
-        # Remove: self.transaction_id = None  # This causes race conditions!
+
         self._transaction_modifications = []  # Track changes for rollback
         self._transaction_modifications_lock = threading.Lock()
 
@@ -257,13 +257,9 @@ class Table:
             page_range = self._get_or_create_page_range()
             offset = page_range.write_base_record(full_record)
 
-            # UPDATE PAGE_DIRECTORY FIRST before updating index
-            # This ensures that by the time index has the RID, page_directory also has it
             with self.page_directory_lock:
                 self.page_directory[rid] = (page_range.range_idx, False, offset)
 
-            # THEN update indices while holding index_lock
-            # Now it's safe for other threads to find this RID in the index
             for col_num in range(self.num_columns):
                 if self.index.indices[col_num] is not None:
                     value = columns[col_num]
@@ -583,7 +579,7 @@ class Table:
 
                     # Update TPS
                     pid = page_range._page_id(False, RID_COLUMN, page_index)
-                    page = this.bufferpool.fix_page(pid, mode="w")
+                    page = self.bufferpool.fix_page(pid, mode="w")
                     current_tps = page.get_tps()
                     if tail_rid > current_tps:
                         page.set_tps(tail_rid)
@@ -651,7 +647,7 @@ class Table:
     def rollback_modifications(self, transaction_id):
         """Rollback all recorded modifications for a specific transaction"""
         with self._transaction_modifications_lock:
-            # Filter to only this transaction's modifications
+            # Filter to only this transaction's modifications (this list notation is insane)
             modifications = [m for m in self._transaction_modifications if m['transaction_id'] == transaction_id]
             self._transaction_modifications = [m for m in self._transaction_modifications if m['transaction_id'] != transaction_id]
         
