@@ -148,12 +148,30 @@ class Index:
             return result
 
         idx_map, head, tail, sorted_keys, dead_keys = column_index
-        cur_node = head
-        while cur_node and cur_node.value < begin:
-            cur_node = cur_node.next
+        # binary search to find starting index
+        low = 0
+        sorted_keys_size = len(sorted_keys)
+        high = sorted_keys_size - 1
+        while low < high:
+            mid = (low + high) // 2
+            if sorted_keys[mid] < begin:
+                low = mid + 1
+            else:
+                high = mid
+        # find first alive node starting from low
+        start_node = None
+        for i in range(low, sorted_keys_size):
+            key = sorted_keys[i]
+            if key > end:
+                break
+            if key not in dead_keys:
+                start_node = idx_map[key]
+                if start_node:
+                    break
+        # traverse from start_node
+        cur_node = start_node
         while cur_node and cur_node.value <= end:
-            if cur_node.value not in dead_keys:  # skip dead keys
-                result.update(cur_node.rids.copy())
+            result.update(cur_node.rids.copy())
             cur_node = cur_node.next
         return result
 
