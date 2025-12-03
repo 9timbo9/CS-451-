@@ -39,22 +39,13 @@ class TransactionWorker:
             self._thread.join()
 
     def __run(self):
-            for transaction in self.transactions:
+        for transaction in self.transactions:
+            # Transaction.run() already handles retries by default with auto_retry=True
+            try:
+                committed = transaction.run()
+            except Exception:
                 committed = False
-                attempts = 0
-                max_attempts = 10  # Prevent infinite loops
-                
-                # Keep retrying until transaction commits or max attempts reached
-                while not committed and attempts < max_attempts:
-                    try:
-                        committed = transaction.run()
-                        attempts += 1
-                    except Exception as e:
-                        committed = False
-                        print(f"Transaction error: {e}")
-                        attempts += 1
-                
-                self.stats.append(committed)
-            
-            self.result = sum(1 for ok in self.stats if ok)
 
+            self.stats.append(committed)
+
+        self.result = sum(1 for ok in self.stats if ok)

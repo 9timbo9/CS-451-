@@ -232,7 +232,7 @@ class Transaction:
 
     def abort(self):
         """Abort transaction and rollback changes"""
-        print(f"Transaction {self.transaction_id} aborted.")
+        # print(f"Transaction {self.transaction_id} aborted.")
         self._aborted = True
         
         # Rollback modifications on all affected tables
