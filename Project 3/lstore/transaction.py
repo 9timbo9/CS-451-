@@ -190,10 +190,12 @@ class Transaction:
                 records.append((rid, LockType.EXCLUSIVE))
         
         elif query_name == 'insert':
-            # INSERT - use a table-level lock for simplicity
-            table_lock_id = f"table_{table.name}"
-            records.append((table_lock_id, LockType.EXCLUSIVE))
-        
+            # INSERT: lock on the primary key instead of the whole table
+            # args = columns passed to Query.insert(*columns)
+            primary_key_value = args[table.key]
+            pk_lock_id = f"insert_pk_{table.name}_{primary_key_value}"
+            records.append((pk_lock_id, LockType.EXCLUSIVE))
+
         elif query_name == 'delete':
             # DELETE needs exclusive locks
             primary_key = args[0]
