@@ -30,6 +30,18 @@ class Index:
         if create_index:
             self.create_index(table.key)  # Key column should be indexed by default
 
+    def _binary_search(self, sorted_keys, value):
+        left = 0
+        right = len(sorted_keys)
+
+        while left < right:
+            mid = (left + right) // 2
+            if sorted_keys[mid] < value:
+                left = mid + 1
+            else:
+                right = mid
+        return left
+
     def create_index(self, column_number):
         """
         Create index on specific column.
@@ -61,7 +73,7 @@ class Index:
         last_node = None
         for key in sorted(idx_map.keys()):
             node = IndexNode(key)
-            node.rids.update(idx_map[key])
+            node.rids = idx_map[key]
             idx_map[key] = node
 
             if last_node is None:
@@ -72,7 +84,9 @@ class Index:
             last_node = node
 
         tail = last_node
-        self.indices[column_number] = (idx_map, head, tail)
+        sorted_keys = sorted(idx_map.keys())
+
+        self.indices[column_number] = (idx_map, head, tail, sorted_keys)
 
     def drop_index(self, column_number):
         """
@@ -89,7 +103,7 @@ class Index:
         column_index = self.indices[column]
         # If index exists, use it
         if column_index is not None:
-            idx_map, head, tail = column_index
+            idx_map, head, tail, sorted_keys = column_index
             node = idx_map.get(value)
             if node:
                 return node.rids.copy()
@@ -102,9 +116,7 @@ class Index:
             if is_tail:
                 continue
             latest_values, _ = self.table.get_latest_version(rid)
-            if latest_values is None:
-                continue
-            if latest_values[column] == value:
+            if latest_values and latest_values[column] == value:
                 result.add(rid)
         return result
 
@@ -127,7 +139,7 @@ class Index:
                     result.add(rid)
             return result
 
-        idx_map, head, tail = column_index
+        idx_map, head, tail, sorted_keys = column_index
         cur_node = head
         while cur_node and cur_node.value < begin:
             cur_node = cur_node.next
@@ -144,7 +156,7 @@ class Index:
         column_index = self.indices[column]
         if column_index is None:
             return  # index does not exist for this column
-        idx_map, head, tail = column_index
+        idx_map, head, tail, sorted_keys = column_index
         if value in idx_map:  # Value already exists in index
             node = idx_map[value]
             node.rids.add(rid)
@@ -152,30 +164,40 @@ class Index:
         # New value needs to be inserted
         node = IndexNode(value)
         node.rids.add(rid)
+        # Quick insert at head or tail
+        if tail is not None and value > tail.value:
+            sorted_keys.append(value)
+            idx_map[value] = node
+            node.prev = tail
+            tail.next = node
+            tail = node
+            self.indices[column] = (idx_map, head, tail, sorted_keys)
+            return
         idx_map[value] = node
+        # Find position using binary search
+        pos = self._binary_search(sorted_keys, value)
+        sorted_keys.insert(pos, value)
         # Insert into LL in sorted order
         if head is None:  # empty list
             head = tail = node
-        elif value < head.value:  # insert at head
+        elif pos == 0:  # insert at head
             node.next = head
             head.prev = node
             head = node
-        elif value > tail.value:  # insert at tail
+        elif pos == len(sorted_keys) - 1:  # insert at tail
             tail.next = node
             node.prev = tail
             tail = node
         else:  # insert in middle
-            # TODO: optimize by binary search
-            cur_node = head
-            while cur_node.value < value:
-                cur_node = cur_node.next
-            # Insert before cur_node
-            prev_node = cur_node.prev
-            prev_node.next = node
+            prev_key = sorted_keys[pos - 1]
+            next_key = sorted_keys[pos + 1]
+            prev_node = idx_map[prev_key]
+            next_node = idx_map[next_key]
             node.prev = prev_node
-            node.next = cur_node
-            cur_node.prev = node
-        self.indices[column] = (idx_map, head, tail)  # update index
+            node.next = next_node
+            prev_node.next = node
+            next_node.prev = node
+        self.indices[column] = (idx_map, head, tail, sorted_keys)  # update index
 
     def delete(self, column, value, rid):
         """
@@ -185,7 +207,7 @@ class Index:
         column_index = self.indices[column]
         if column_index is None:
             return  # index does not exist for this column
-        idx_map, head, tail = column_index
+        idx_map, head, tail, sorted_keys = column_index
         node_to_update = idx_map.get(value)
         if not node_to_update:
             return  # value not found in index
@@ -200,7 +222,7 @@ class Index:
             else:  # it was the tail
                 tail = node_to_update.prev
             del idx_map[value]  # remove from map
-            self.indices[column] = (idx_map, head, tail)  # update index
+            self.indices[column] = (idx_map, head, tail, sorted_keys)  # update index
 
     def update(self, column, old_value, new_value, rid):
         """
